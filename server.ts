@@ -105,6 +105,49 @@ function shortId(): string {
   return out;
 }
 
+// A whimsical random bot-style name for the curl example, so the docs don't
+// imply any one crawler. e.g. "MossyHarvesterBot/4.2".
+function randomBotName(): string {
+  const adjectives = [
+    "Mossy",
+    "Curious",
+    "Quiet",
+    "Restless",
+    "Velvet",
+    "Copper",
+    "Wandering",
+    "Nimble",
+    "Drowsy",
+    "Hollow",
+    "Amber",
+    "Frosted",
+    "Crimson",
+    "Gentle",
+    "Rogue",
+  ];
+  const nouns = [
+    "Harvester",
+    "Forager",
+    "Lantern",
+    "Pebble",
+    "Magpie",
+    "Otter",
+    "Compass",
+    "Beacon",
+    "Thistle",
+    "Falcon",
+    "Comet",
+    "Willow",
+    "Sprocket",
+    "Heron",
+    "Cipher",
+  ];
+  const pick = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)];
+  const major = Math.floor(Math.random() * 9) + 1;
+  const minor = Math.floor(Math.random() * 10);
+  return `${pick(adjectives)}${pick(nouns)}Bot/${major}.${minor}`;
+}
+
 function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
   // Deno Deploy sets x-forwarded-for; fall back to remote addr.
   const xff = req.headers.get("x-forwarded-for");
@@ -452,6 +495,16 @@ main { max-width: 860px; width: 100%; margin: auto; padding: 1.5em 1em 4em; }
   font-family: Georgia, "Times New Roman", Times, serif;
   text-align: center; color: var(--muted); font-size: 1.15em; margin-top: 0.4em;
 }
+.current-trace-link {
+  text-align: center; margin: 0 0 1em;
+}
+.current-trace-link a {
+  display: inline-block; padding: 0.5em 1.1em; border: 1px solid var(--border);
+  border-radius: 999px; background: var(--bg-secondary); text-decoration: none;
+  font-weight: 600; font-size: 0.95em;
+}
+.current-trace-link a:hover { background: var(--border); }
+.current-trace-link code { background: transparent; padding: 0; }
 h1, h2, h3 { font-family: Georgia, "Times New Roman", Times, serif; font-weight: normal; }
 h2 { font-size: 1.8em; margin: 1.4em 0 0.5em; }
 h3 { font-size: 1.3em; margin: 1.2em 0 0.4em; }
@@ -753,6 +806,9 @@ ${REQ_TABLE_HEAD}
 </form>`;
 
   const body = `
+<p class="current-trace-link"><a href="/trace/${
+    escapeHtml(id)
+  }">→ View the trace for this request (<code>${escapeHtml(id)}</code>)</a></p>
 <section class="explainer">
 <p>This page just minted a fresh trace id <code>${escapeHtml(id)}</code>. Every asset it references
 lives under <code>/r/${
@@ -762,7 +818,7 @@ your User-Agent. Layered probes inside the CSS and JS reveal whether your UA par
 resources linked from CSS, and actually executes JavaScript.</p>
 <p><strong>Try it:</strong> point a crawler at this URL, or run a fresh trace with curl —
 each load is its own trace:</p>
-<pre class="headers">curl -A "ClaudeBot/1.0" ${escapeHtml(origin)}/</pre>
+<pre class="headers">curl -A "${escapeHtml(randomBotName())}" ${escapeHtml(origin)}/</pre>
 <p style="margin-bottom:0">…then open the matching row below. A plain <code>curl</code> only records the homepage
 hit (it parses no CSS and runs no JS) — that contrast is the whole point.</p>
 </section>

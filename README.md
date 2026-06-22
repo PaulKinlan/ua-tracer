@@ -30,16 +30,27 @@ homepage hit and the User-Agent that made it.
 On top of that, the assets reference _further_ probes — and this is where the interesting signal
 comes from:
 
-| Probe                    | Referenced from                                                             | Hitting it proves…                                     |
-| ------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `/r/{id}/css-bg.png`     | `background-image:` inside `style.css`                                      | the UA parsed the CSS and followed a URL inside it     |
-| `/r/{id}/css-font.woff2` | `@font-face { src: }` inside `style.css`                                    | the UA resolved a CSS `@font-face` source              |
-| `/r/{id}/js-ran.gif`     | `new Image().src = …` inside `main.js`, at runtime                          | the UA **executed** the JS (not merely downloaded it)  |
-| `/r/{id}/timing`         | a `POST` from `main.js` carrying `performance.getEntriesByType('resource')` | a real engine ran and produced a client-side waterfall |
+| Probe                          | Referenced from                                                             | Hitting it proves…                                                     |
+| ------------------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `/r/{id}/css-bg.png`           | `background-image:` on a rendered element, inside `style.css`               | the UA parsed the CSS, rendered the box, and followed a URL inside it  |
+| `/r/{id}/css-font.woff2`       | `@font-face { src: }` used by rendered text, inside `style.css`             | the UA resolved a CSS `@font-face` source                              |
+| `/r/{id}/manifest.json`        | `<link rel="manifest">`                                                     | the UA fetched the web app manifest                                    |
+| `/r/{id}/manifest-icon.png`    | `icons[].src` inside `manifest.json`                                        | the UA **parsed the manifest** and followed an icon linked from it     |
+| `/r/{id}/favicon.ico`          | `<link rel="icon">`                                                         | the UA fetched the favicon                                             |
+| `/r/{id}/apple-touch-icon.png` | `<link rel="apple-touch-icon">`                                             | the UA fetched the iOS home-screen icon                                |
+| `/r/{id}/preload.png`          | `<link rel="preload" as="image">`                                           | the UA honoured a speculative preload hint                             |
+| `/r/{id}/prefetch.png`         | `<link rel="prefetch">`                                                     | the UA honoured a speculative prefetch hint                            |
+| `/r/{id}/og-image.png`         | `<meta property="og:image">`                                                | a social unfurler fetched the Open Graph image                         |
+| `/r/{id}/twitter-image.png`    | `<meta name="twitter:image">`                                               | a social unfurler fetched the Twitter card image                       |
+| `/r/{id}/js-ran.gif`           | `new Image().src = …` inside `main.js`, at runtime                          | the UA **executed** classic JS (not merely downloaded it)              |
+| `/r/{id}/module-ran.gif`       | a runtime beacon inside an ES module (`<script type="module">`)             | the UA **executed an ES module** (some run classic JS but not modules) |
+| `/r/{id}/timing`               | a `POST` from `main.js` carrying `performance.getEntriesByType('resource')` | a real engine ran and produced a client-side waterfall                 |
 
 A plain downloader will fetch the HTML and maybe the directly-referenced assets. A CSS-aware fetcher
-will additionally hit `css-bg.png` / `css-font.woff2`. Only a UA that runs JavaScript will ever hit
-`js-ran.gif` or post to `timing`.
+will additionally hit `css-bg.png` / `css-font.woff2`. A UA that parses the manifest reaches
+`manifest-icon.png`. Social unfurlers (facebookexternalhit, Twitterbot, Slackbot, Discordbot,
+LinkedInBot) tend to fetch the `og:image` / `twitter:image`. Only a UA that runs JavaScript will
+ever hit `js-ran.gif` / `module-ran.gif` or post to `timing`.
 
 Each asset endpoint logs the hit (trace id, asset kind, UA, IP, method, full request headers,
 server-receive timestamp) to **Deno KV**, then serves a real, valid response of the correct
@@ -73,13 +84,27 @@ content-type (real CSS/JS, a real PNG/GIF, a real woff2 — all generated/embedd
 ## Storage (Deno KV)
 
 ```
-["trace", id]                  -> homepage TraceRecord
+["trace", id]                  -> homepage TraceRecord (UA, IP, full headers)
 ["hit",   id, tsKey]           -> each asset HitRecord (listed in receive order)
-["recent", reverseTsKey, id]   -> recent-traces index (newest first)
+["recent", reverseTsKey, id]   -> recent-traces index; value is a denormalized
+                                  TraceStats snapshot (asset count, jsRan, kinds)
 ```
+
+The recent-index value holds a denormalized `TraceStats` snapshot so the homepage can render the
+list **and** the per-user-agent running counts from a single `list()` — it never lists every trace's
+hits. Sub-request hits bump that snapshot via an **atomic compare-and-set** (versionstamp) retry
+loop, because many sub-requests for one trace arrive concurrently and a plain get→set would race and
+lose updates. This is what keeps the Deno KV connection pool from being exhausted under crawler load
+(which otherwise surfaces as `POOL_DEPLETED` 503s).
 
 Deno Deploy isolates restart frequently, so state lives entirely in Deno KV — never in in-memory
 maps.
+
+## Filtering by user agent
+
+The homepage shows a **By user agent** table with running request counts (and how many ran JS) per
+UA. Click any row, or hit `/?ua=<substring>`, to filter the recent-requests list to matching user
+agents — handy for isolating ClaudeBot / GPTBot / Googlebot activity.
 
 ## Run locally
 
@@ -89,8 +114,20 @@ deno task dev      # http://localhost:8000
 
 ## Deploy
 
-Deployed to Deno Deploy. The entrypoint is `server.ts`; it needs `--allow-net` and Deno KV
-(available automatically on Deno Deploy).
+Deployed to Deno Deploy (`ua-tracer.paulkinlan-ea.deno.net`). The entrypoint is `server.ts` (dynamic
+runtime). It requires a **Deno KV database provisioned and assigned to the app** — `Deno.openKv()`
+is not auto-available; without it the build fails at the warmup step. Provision and bind it once:
+
+```sh
+deno deploy database provision ua-tracer-kv --kind denokv --org <org>
+deno deploy database assign  ua-tracer-kv --org <org> --app ua-tracer
+```
+
+Then deploy from a local checkout:
+
+```sh
+deno deploy --org <org> --app ua-tracer --prod
+```
 
 ## License
 

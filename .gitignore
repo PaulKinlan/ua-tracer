@@ -1,0 +1,13 @@
+# Deno
+.deno/
+*.local
+
+# Local KV store
+*.sqlite
+*.sqlite-*
+kv.db*
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/

@@ -9,9 +9,13 @@
 //
 // Storage: Deno KV (Deno Deploy isolates restart frequently — never in-memory).
 
-/// <reference lib="deno.unstable" />
-
-const kv = await Deno.openKv();
+// Lazily open Deno KV so module evaluation never blocks/fails at build time
+// (Deno Deploy provisions KV lazily; top-level await on openKv can break builds).
+let _kv: Deno.Kv | null = null;
+async function getKv(): Promise<Deno.Kv> {
+  if (!_kv) _kv = await Deno.openKv();
+  return _kv;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -249,6 +253,7 @@ const WOFF2_FONT = decodeBase64(
 // ---------------------------------------------------------------------------
 
 async function logHit(rec: HitRecord): Promise<void> {
+  const kv = await getKv();
   // Sequence per trace so we can list hits in receive order. Use a counter via
   // atomic-ish read+write; collisions are fine (we order by ts then seq).
   const tsNanos = BigInt(rec.ts) * 1000000n +
@@ -260,6 +265,7 @@ async function logHit(rec: HitRecord): Promise<void> {
 }
 
 async function listHits(id: string): Promise<HitRecord[]> {
+  const kv = await getKv();
   const hits: HitRecord[] = [];
   for await (const entry of kv.list<HitRecord>({ prefix: ["hit", id] })) {
     hits.push(entry.value);
@@ -269,6 +275,7 @@ async function listHits(id: string): Promise<HitRecord[]> {
 }
 
 async function recentTraces(limit = 100): Promise<TraceRecord[]> {
+  const kv = await getKv();
   const out: TraceRecord[] = [];
   // recent index keyed by [recent, reverseTs, id] so newest sorts first.
   for await (
@@ -632,6 +639,7 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
 
   // Persist the trace + recent index. Use reverse-sortable key for "recent"
   // so newest sorts first when we list (Number.MAX - ts).
+  const kv = await getKv();
   const reverseKey = (Number.MAX_SAFE_INTEGER - ts).toString().padStart(20, "0");
   await kv.atomic()
     .set(["trace", id], rec)
@@ -671,6 +679,7 @@ const KIND_LABEL: Record<AssetKind, string> = {
 };
 
 async function handleTrace(id: string): Promise<Response> {
+  const kv = await getKv();
   const trace = await kv.get<TraceRecord>(["trace", id]);
   if (!trace.value) {
     return new Response(

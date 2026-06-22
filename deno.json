@@ -3,9 +3,6 @@
     "dev": "deno run --watch --allow-net --unstable-kv server.ts",
     "start": "deno run --allow-net --unstable-kv server.ts"
   },
-  "deploy": {
-    "entrypoint": "server.ts"
-  },
   "fmt": {
     "lineWidth": 100
   },
@@ -13,5 +10,13 @@
     "rules": {
       "tags": ["recommended"]
     }
+  },
+  "deploy": {
+    "org": "paulkinlan-ea",
+    "app": "ua-tracer"
   }
 }
+
+
+
+

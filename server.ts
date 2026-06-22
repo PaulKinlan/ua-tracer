@@ -30,6 +30,20 @@ interface TraceRecord {
   headers: Record<string, string>;
 }
 
+// Denormalized per-trace stats, updated as hits arrive. Lets the homepage
+// render the list + per-UA counts with O(1) reads per trace instead of an
+// expensive list() over every trace's hits (which exhausted the KV pool under
+// crawler load — POOL_DEPLETED 503s).
+interface TraceStats {
+  id: string;
+  ts: number;
+  ua: string;
+  ip: string;
+  assetCount: number; // sub-requests, excludes the homepage hit
+  jsRan: boolean; // js-ran.gif was hit
+  kinds: AssetKind[]; // distinct kinds seen (for quick badges)
+}
+
 type AssetKind =
   | "homepage"
   | "css"
@@ -267,6 +281,13 @@ const ICO_FAVICON = decodeBase64(
 // Logging of hits
 // ---------------------------------------------------------------------------
 
+// Recent-index key: newest sorts first (MAX - ts). Shared by the homepage
+// seeder and logHit's incremental updates so they target the same entry.
+function recentIndexKey(ts: number, id: string): [string, string, string] {
+  const reverseKey = (Number.MAX_SAFE_INTEGER - ts).toString().padStart(20, "0");
+  return ["recent", reverseKey, id];
+}
+
 async function logHit(rec: HitRecord): Promise<void> {
   const kv = await getKv();
   // Sequence per trace so we can list hits in receive order. Use a counter via
@@ -274,6 +295,38 @@ async function logHit(rec: HitRecord): Promise<void> {
   const tsNanos = BigInt(rec.ts) * 1000000n +
     BigInt(Math.floor(performance.now() * 1000) % 1000000);
   await kv.set(["hit", rec.id, tsNanos.toString().padStart(25, "0")], rec);
+
+  // Update the denormalized stats stored IN the recent index entry so the
+  // homepage never has to list every trace's hits. The homepage hit seeds the
+  // entry (see handleHomepage); sub-requests bump it here. The recent key is
+  // derived from the TRACE's timestamp (not this hit's), so resolve the trace
+  // record to get it.
+  if (rec.kind !== "homepage") {
+    const trace = await kv.get<TraceRecord>(["trace", rec.id]);
+    if (trace.value) {
+      const recentKey = recentIndexKey(trace.value.ts, rec.id);
+      // Concurrent sub-requests (css-bg, js-ran, font, …) all update the same
+      // stats entry, so use an atomic compare-and-set on the versionstamp with
+      // a small retry loop. A plain get→set races and loses updates (e.g. the
+      // jsRan flag getting clobbered).
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const cur = await kv.get<TraceStats>(recentKey);
+        if (!cur.value) break; // entry not seeded (shouldn't happen)
+        const s = cur.value;
+        s.assetCount += 1;
+        if (rec.kind === "js-ran") s.jsRan = true;
+        if (!s.kinds.includes(rec.kind)) s.kinds.push(rec.kind);
+        const res = await kv.atomic()
+          .check({ key: recentKey, versionstamp: cur.versionstamp })
+          .set(recentKey, s)
+          .commit();
+        if (res.ok) break;
+        // Lost the race: brief backoff, then retry with fresh value.
+        await new Promise((r) => setTimeout(r, 5 + attempt * 5));
+      }
+    }
+  }
+
   console.log(
     `[hit] trace=${rec.id} kind=${rec.kind} ip=${rec.ip} ua="${rec.ua.slice(0, 80)}"`,
   );
@@ -289,19 +342,20 @@ async function listHits(id: string): Promise<HitRecord[]> {
   return hits;
 }
 
-async function recentTraces(limit = 100): Promise<TraceRecord[]> {
+// Returns recent traces as denormalized stats with NO per-trace extra reads.
+// The recent index value holds the stats snapshot, which is kept fresh by
+// updating the index entry whenever a trace's stats change.
+async function recentTraces(limit = 100): Promise<TraceStats[]> {
   const kv = await getKv();
-  const out: TraceRecord[] = [];
+  const out: TraceStats[] = [];
   // recent index keyed by [recent, reverseTs, id] so newest sorts first.
   for await (
-    const entry of kv.list<string>({ prefix: ["recent"] }, {
+    const entry of kv.list<TraceStats>({ prefix: ["recent"] }, {
       limit,
       reverse: false,
     })
   ) {
-    const id = entry.value;
-    const trace = await kv.get<TraceRecord>(["trace", id]);
-    if (trace.value) out.push(trace.value);
+    if (entry.value && typeof entry.value === "object") out.push(entry.value);
   }
   return out;
 }
@@ -395,6 +449,13 @@ footer { max-width: 860px; margin: 2em auto 3em; padding-top: 1em; border-top: 1
 code { font-family: SFMono-Regular, Consolas, Menlo, monospace; background: var(--bg-secondary);
   padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.9em; }
 .empty { color: var(--muted); font-style: italic; }
+.probe-panel { margin: 2em 0 0.5em; padding: 1em 1.2em; border: 1px dashed var(--border);
+  border-radius: 8px; background: var(--background); }
+.probe-panel h3 { margin: 0 0 0.5em; font-size: 1.1em; }
+.probe-panel p { margin-bottom: 0.7em; }
+.probe-panel code { font-size: 0.85em; }
+.probe-img-row { display: flex; align-items: center; gap: 0.7em; color: var(--muted); font-size: 0.9em; }
+.probe-img { border-radius: 6px; display: block; flex: 0 0 auto; }
 .filter-bar { display: flex; gap: 0.5em; align-items: center; margin: 0.6em 0 1em; flex-wrap: wrap; }
 .filter-bar input[type="search"] { flex: 1; min-width: 240px; padding: 0.5em 0.7em;
   font-size: 0.95em; border: 1px solid var(--border); border-radius: 6px;
@@ -445,16 +506,14 @@ ${body}
 interface HomepageOpts {
   id: string;
   origin: string;
-  traces: TraceRecord[];
-  jsRanByTrace: Map<string, boolean>;
-  countByTrace: Map<string, number>;
+  traces: TraceStats[];
   uaGroups: Map<string, { count: number; jsRan: number }>;
   uaFilter: string;
   totalTraces: number;
 }
 
 function homepageHtml(opts: HomepageOpts): string {
-  const { id, origin, traces, jsRanByTrace, countByTrace, uaGroups, uaFilter, totalTraces } = opts;
+  const { id, origin, traces, uaGroups, uaFilter, totalTraces } = opts;
   const base = `/r/${id}`;
   // Probe assets all reference {id}. Page chrome styling is INLINE only.
   // These <head> links exercise: stylesheet, font preload, favicon,
@@ -478,8 +537,8 @@ function homepageHtml(opts: HomepageOpts): string {
 <meta name="twitter:image" content="${origin}${base}/twitter-image.png">
 `;
   const rows = traces.map((t) => {
-    const ran = jsRanByTrace.get(t.id);
-    const count = countByTrace.get(t.id) ?? 0;
+    const ran = t.jsRan;
+    const count = t.assetCount;
     return `<tr>
   <td class="mono"><a href="/trace/${escapeHtml(t.id)}">${fmtTs(t.ts)}</a></td>
   <td><span class="ua" title="${escapeHtml(t.ua)}">${escapeHtml(t.ua || "—")}</span></td>
@@ -569,8 +628,11 @@ ${table}
   display:none / not removed from layout) and must contain text in the custom
   font. We keep it visible but quiet.
 -->
-<p class="ua-tracer-probe" aria-hidden="true">This line uses the probe font and a CSS background image so we can detect whether your user agent follows resources linked from inside a stylesheet.</p>
-<img src="${base}/photo.png" width="32" height="32" alt="probe image">
+<section class="probe-panel" aria-hidden="true">
+  <h3>Live probe assets</h3>
+  <p class="ua-tracer-probe">This line is set in the probe @font-face and shows the CSS background-image swatch on the left. If your user agent fetched <code>css-bg.png</code> and <code>css-font.woff2</code>, it parsed the stylesheet and followed resources linked from inside it.</p>
+  <p class="probe-img-row"><img src="${base}/photo.png" width="40" height="40" alt="probe image (PNG referenced from the HTML)" class="probe-img"> <span>A real PNG referenced directly from the HTML.</span></p>
+</section>
 <script src="${base}/main.js"></script>
 <script type="module" src="${base}/module.js"></script>
 `;
@@ -595,6 +657,11 @@ function cssBody(id: string): string {
   //  - font-family on text -> @font-face src css-font.woff2
   // font-display:block (not swap) makes engines that load fonts request the
   // woff2 promptly rather than deferring it indefinitely.
+  // The probe panel must (a) render a sized box with a CSS background-image so
+  // css-bg.png is fetched, and (b) render text in @font-face "uatracerprobe" so
+  // css-font.woff2 is fetched. We keep the background-image as a small swatch
+  // pinned to the left edge (not tiled across the text) so the body text stays
+  // high-contrast in both light and dark mode.
   return `/* ua-tracer probe stylesheet for trace ${id} */
 @font-face {
   font-family: "uatracerprobe";
@@ -604,14 +671,19 @@ function cssBody(id: string): string {
 .ua-tracer-probe {
   display: block;
   min-height: 1.6em;
-  padding: 0.6em 0.8em;
+  padding: 0.7em 0.9em 0.7em 3.4em;
   margin: 1.4em 0;
-  color: var(--muted);
-  font-size: 0.95em;
+  color: var(--color);
+  font-size: 0.9em;
+  line-height: 1.5;
   font-family: "uatracerprobe", Georgia, serif;
+  /* css-bg.png shown as a 24px swatch on the left only — proves the fetch
+     without bleeding under the text. background-color comes from the page. */
   background-image: url("${base}/css-bg.png");
-  background-repeat: repeat;
-  background-size: 12px 12px;
+  background-repeat: no-repeat;
+  background-position: 0.9em center;
+  background-size: 24px 24px;
+  background-color: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: 6px;
 }
@@ -860,14 +932,25 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
   const proto = req.headers.get("x-forwarded-proto") ?? reqUrl.protocol.replace(":", "");
   const origin = `${proto}://${host}`;
   const rec: TraceRecord = { id, ts, ua, ip, method: req.method, headers };
+  const seedStats: TraceStats = {
+    id,
+    ts,
+    ua,
+    ip,
+    assetCount: 0,
+    jsRan: false,
+    kinds: [],
+  };
 
-  // Persist the trace + recent index. Use reverse-sortable key for "recent"
-  // so newest sorts first when we list (Number.MAX - ts).
+  // Persist the trace + recent index in one atomic write. The recent index
+  // value is a TraceStats snapshot (not just the id), so the homepage renders
+  // the list AND the per-UA counts WITHOUT any per-trace follow-up reads —
+  // this is what prevents the KV connection pool from being depleted under
+  // crawler load (the previous N+1 list() pattern caused POOL_DEPLETED 503s).
   const kv = await getKv();
-  const reverseKey = (Number.MAX_SAFE_INTEGER - ts).toString().padStart(20, "0");
   await kv.atomic()
     .set(["trace", id], rec)
-    .set(["recent", reverseKey, id], id)
+    .set(recentIndexKey(ts, id), seedStats)
     .commit();
   // Also log the homepage itself as a hit so the trace waterfall has a root.
   await logHit({ id, kind: "homepage", ts, ua, ip, method: req.method, headers });
@@ -877,17 +960,8 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
   // Optional UA filter (case-insensitive substring) from ?ua=…
   const uaFilter = reqUrl.searchParams.get("ua")?.trim() ?? "";
 
-  // Build recent list with derived stats (over the full recent set, so the
-  // per-UA summary counts everything; the table itself is filtered below).
+  // Single cheap read: recent stats straight from the index (no N+1).
   const allTraces = await recentTraces(200);
-  const jsRanByTrace = new Map<string, boolean>();
-  const countByTrace = new Map<string, number>();
-  for (const t of allTraces) {
-    const hits = await listHits(t.id);
-    // count excludes the homepage hit itself
-    countByTrace.set(t.id, hits.filter((h) => h.kind !== "homepage").length);
-    jsRanByTrace.set(t.id, hits.some((h) => h.kind === "js-ran"));
-  }
 
   // Per-UA running counts (grouped by exact UA string).
   const uaGroups = new Map<string, { count: number; jsRan: number }>();
@@ -895,7 +969,7 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
     const key = t.ua || "(no user-agent)";
     const g = uaGroups.get(key) ?? { count: 0, jsRan: 0 };
     g.count++;
-    if (jsRanByTrace.get(t.id)) g.jsRan++;
+    if (t.jsRan) g.jsRan++;
     uaGroups.set(key, g);
   }
 
@@ -908,8 +982,6 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
       id,
       origin,
       traces: filtered.slice(0, 100),
-      jsRanByTrace,
-      countByTrace,
       uaGroups,
       uaFilter,
       totalTraces: allTraces.length,

@@ -821,9 +821,11 @@ function kindBadges(kinds: AssetKind[]): string {
   return present.map((k) => `<span class="badge kind">${SHORT_KIND[k] ?? k}</span>`).join("");
 }
 
-// Render the recent-requests rows: a main row (timestamp, UA, IP, assets) plus
+// Render the recent-requests rows: a main row (timestamp, UA, assets) plus
 // a snug full-width pills row beneath it (JS state + each sub-resource fetched).
 // Keeping the pills out of the main columns keeps every main row the same height.
+// IP is captured and stored but intentionally not displayed for now — the plan
+// is to surface IPs for bots only, not for human visitors.
 function traceRows(traces: TraceStats[]): string {
   return traces.map((t) => {
     const js = t.jsRan
@@ -832,17 +834,16 @@ function traceRows(traces: TraceStats[]): string {
     return `<tr class="req-row">
   <td class="mono"><a href="/trace/${escapeHtml(t.id)}">${fmtTs(t.ts)}</a></td>
   <td><span class="ua" title="${escapeHtml(t.ua)}">${escapeHtml(t.ua || "—")}</span></td>
-  <td class="mono">${escapeHtml(t.ip)}</td>
   <td class="mono">${t.assetCount}</td>
 </tr>
-<tr class="pills-row"><td colspan="4"><div class="kinds-cell">${js}${
+<tr class="pills-row"><td colspan="3"><div class="kinds-cell">${js}${
       kindBadges(t.kinds)
     }</div></td></tr>`;
   }).join("\n");
 }
 
 const REQ_TABLE_HEAD =
-  "<thead><tr><th>Timestamp</th><th>User Agent</th><th>IP</th><th>Assets</th></tr></thead>";
+  "<thead><tr><th>Timestamp</th><th>User Agent</th><th>Assets</th></tr></thead>";
 
 // Render a prev/next pager. `href(p)` builds the link for page p (0-based).
 function pager(page: number, total: number, size: number, href: (p: number) => string): string {
@@ -1585,13 +1586,12 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, p, re
     }" title="Reverse lookup: all requests from ${escapeHtml(ua)}">${
       escapeHtml(pr.ua || "—")
     }</a></td>
-  <td class="mono">${escapeHtml(pr.ip)}</td>
   <td class="mono">${relCell}</td>
 </tr>`;
   }).join("\n");
   const probesSection = probes.length
     ? `<div class="scrollx"><table>
-<thead><tr><th>Timestamp</th><th>Path</th><th>User Agent (click for reverse lookup)</th><th>IP</th><th>Related trace</th></tr></thead>
+<thead><tr><th>Timestamp</th><th>Path</th><th>User Agent (click for reverse lookup)</th><th>Related trace</th></tr></thead>
 <tbody>${probeRows}</tbody>
 </table></div>`
     : `<p class="empty">No unsolicited probe requests${
@@ -1908,8 +1908,7 @@ browser-grade engine, not just a downloader.</p>
 <p><a href="/">← all traces</a></p>
 <h2>Trace <code>${escapeHtml(id)}</code></h2>
 <p><strong>First seen:</strong> ${fmtTs(t0)}<br>
-<strong>User-Agent:</strong> <span class="mono">${escapeHtml(trace.value.ua || "—")}</span><br>
-<strong>IP:</strong> <span class="mono">${escapeHtml(trace.value.ip)}</span></p>
+<strong>User-Agent:</strong> <span class="mono">${escapeHtml(trace.value.ua || "—")}</span></p>
 ${summary}
 <h2>Server-side request waterfall</h2>
 <p>Every request the server received for this trace, in receive order. <code>+ms</code> is the delta from the

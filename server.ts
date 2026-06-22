@@ -475,8 +475,14 @@ pre.headers { font-family: SFMono-Regular, Consolas, Menlo, monospace; font-size
 .pager { display: flex; gap: 1em; align-items: center; margin: 0.6em 0; font-size: 0.9em; flex-wrap: wrap; }
 .pager .muted { color: var(--muted); }
 .scrollx { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
-.kinds-cell { display: flex; gap: 0.3em; flex-wrap: wrap; }
-.kinds-cell .badge.kind { font-weight: 500; font-size: 0.72em; }
+.kinds-cell { display: flex; gap: 0.3em; flex-wrap: wrap; align-items: center; }
+.kinds-cell .badge { font-weight: 500; font-size: 0.72em; }
+/* Each request renders as two rows: the main row, then a snug full-width pills
+   row (sub-resources + JS state) so variable pill counts don't make the main
+   rows different heights. */
+tr.req-row td { border-bottom: none; padding-bottom: 0.25em; }
+tr.pills-row td { border-top: none; padding-top: 0; padding-bottom: 0.7em; }
+tr.pills-row:hover td { background: transparent; }
 .see-all { font-size: 0.9em; }
 @media (max-width: 640px) {
   main { padding: 1.2em 0.7em 3em; }
@@ -558,6 +564,29 @@ function kindBadges(kinds: AssetKind[]): string {
   return present.map((k) => `<span class="badge kind">${SHORT_KIND[k] ?? k}</span>`).join("");
 }
 
+// Render the recent-requests rows: a main row (timestamp, UA, IP, assets) plus
+// a snug full-width pills row beneath it (JS state + each sub-resource fetched).
+// Keeping the pills out of the main columns keeps every main row the same height.
+function traceRows(traces: TraceStats[]): string {
+  return traces.map((t) => {
+    const js = t.jsRan
+      ? '<span class="badge yes">JS ran</span>'
+      : '<span class="badge no">no JS</span>';
+    return `<tr class="req-row">
+  <td class="mono"><a href="/trace/${escapeHtml(t.id)}">${fmtTs(t.ts)}</a></td>
+  <td><span class="ua" title="${escapeHtml(t.ua)}">${escapeHtml(t.ua || "—")}</span></td>
+  <td class="mono">${escapeHtml(t.ip)}</td>
+  <td class="mono">${t.assetCount}</td>
+</tr>
+<tr class="pills-row"><td colspan="4"><div class="kinds-cell">${js}${
+      kindBadges(t.kinds)
+    }</div></td></tr>`;
+  }).join("\n");
+}
+
+const REQ_TABLE_HEAD =
+  "<thead><tr><th>Timestamp</th><th>User Agent</th><th>IP</th><th>Assets</th></tr></thead>";
+
 // Render a prev/next pager. `href(p)` builds the link for page p (0-based).
 function pager(page: number, total: number, size: number, href: (p: number) => string): string {
   const pages = Math.max(1, Math.ceil(total / size));
@@ -612,23 +641,12 @@ function homepageHtml(opts: HomepageOpts): string {
   // Homepage shows a bounded preview (paging lives on /traces, which does not
   // mint a trace on each navigation).
   const shownTraces = traces.slice(0, REQ_PAGE_SIZE);
-  const rows = shownTraces.map((t) =>
-    `<tr>
-  <td class="mono"><a href="/trace/${escapeHtml(t.id)}">${fmtTs(t.ts)}</a></td>
-  <td><span class="ua" title="${escapeHtml(t.ua)}">${escapeHtml(t.ua || "—")}</span></td>
-  <td class="mono">${escapeHtml(t.ip)}</td>
-  <td class="mono">${t.assetCount}</td>
-  <td><div class="kinds-cell">${kindBadges(t.kinds)}</div></td>
-  <td>${
-      t.jsRan ? '<span class="badge yes">JS ran</span>' : '<span class="badge no">no JS</span>'
-    }</td>
-</tr>`
-  ).join("\n");
+  const rows = traceRows(shownTraces);
 
   const tracesHref = uaFilter ? `/traces?ua=${encodeURIComponent(uaFilter)}` : "/traces";
   const table = traces.length
     ? `<div class="scrollx"><table>
-<thead><tr><th>Timestamp</th><th>User Agent</th><th>IP</th><th>Assets</th><th>Fetched</th><th>JS?</th></tr></thead>
+${REQ_TABLE_HEAD}
 <tbody>${rows}</tbody>
 </table></div>${
       traces.length > REQ_PAGE_SIZE
@@ -649,7 +667,7 @@ function homepageHtml(opts: HomepageOpts): string {
   const uaRows = uaEntries.slice(0, UA_PAGE_SIZE).map(([ua, g]) => {
     const short = ua.length > 70 ? ua.slice(0, 70) + "…" : ua;
     return `<tr>
-  <td><a href="/?ua=${encodeURIComponent(ua)}" class="ua" title="${escapeHtml(ua)}">${
+  <td><a href="/traces?ua=${encodeURIComponent(ua)}" class="ua" title="${escapeHtml(ua)}">${
       escapeHtml(short)
     }</a></td>
   <td class="mono">${g.count}</td>
@@ -668,8 +686,10 @@ function homepageHtml(opts: HomepageOpts): string {
     }`
     : `<p class="empty">No user agents seen yet.</p>`;
 
+  // Filtering/browsing happens on /traces (read-only, no minting), so the
+  // homepage filter and per-UA links send you there with results shown together.
   const filterBar = `
-<form method="get" action="/" class="filter-bar">
+<form method="get" action="/traces" class="filter-bar">
   <input type="search" name="ua" value="${
     escapeHtml(uaFilter)
   }" placeholder="filter by user-agent substring, e.g. ClaudeBot" aria-label="Filter by user agent">
@@ -1101,21 +1121,10 @@ function tracesPageHtml(opts: TracesOpts): string {
 
   // Recent requests, paged.
   const reqSlice = traces.slice(reqPage * REQ_PAGE_SIZE, (reqPage + 1) * REQ_PAGE_SIZE);
-  const rows = reqSlice.map((t) =>
-    `<tr>
-  <td class="mono"><a href="/trace/${escapeHtml(t.id)}">${fmtTs(t.ts)}</a></td>
-  <td><span class="ua" title="${escapeHtml(t.ua)}">${escapeHtml(t.ua || "—")}</span></td>
-  <td class="mono">${escapeHtml(t.ip)}</td>
-  <td class="mono">${t.assetCount}</td>
-  <td><div class="kinds-cell">${kindBadges(t.kinds)}</div></td>
-  <td>${
-      t.jsRan ? '<span class="badge yes">JS ran</span>' : '<span class="badge no">no JS</span>'
-    }</td>
-</tr>`
-  ).join("\n");
+  const rows = traceRows(reqSlice);
   const table = traces.length
     ? `<div class="scrollx"><table>
-<thead><tr><th>Timestamp</th><th>User Agent</th><th>IP</th><th>Assets</th><th>Fetched</th><th>JS?</th></tr></thead>
+${REQ_TABLE_HEAD}
 <tbody>${rows}</tbody>
 </table></div>
 ${pager(reqPage, traces.length, REQ_PAGE_SIZE, (p) => tracesUrl(uaFilter, uaPage, p))}`
@@ -1159,17 +1168,19 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, p, re
 trace (unlike <a href="/">/</a>), so you can browse the log without adding noise.</p>
 </section>
 
+<h2>Recent homepage requests</h2>
+<p>Filter by user agent and the matching requests appear right below.${
+    uaFilter
+      ? ` Showing requests whose user agent contains <code>${escapeHtml(uaFilter)}</code>.`
+      : ""
+  }</p>
+${filterBar}
+${table}
+
 <h2>By user agent</h2>
 <p>Running counts across the last ${totalTraces} homepage requests (${uaEntries.length} distinct
-agents). Click one to filter.</p>
-${filterBar}
+agents). Click one to set the filter above.</p>
 ${uaSummary}
-
-<h2>Recent homepage requests</h2>
-<p>Each row is one load of <code>/</code> by some user agent.${
-    uaFilter ? ` Filtered to <code>${escapeHtml(uaFilter)}</code>.` : ""
-  }</p>
-${table}
 <p style="margin-top:1.5em"><a href="/">← back to the live tracer (mints a new trace)</a></p>`;
   return pageShell("recent traces · ua-tracer", body);
 }

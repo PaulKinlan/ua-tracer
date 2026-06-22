@@ -178,6 +178,17 @@ function fmtTs(ms: number): string {
   return new Date(ms).toISOString().replace("T", " ").replace("Z", " UTC");
 }
 
+// Human-friendly elapsed duration, e.g. "830ms", "4.2s", "3m", "1h 5m".
+function fmtDelta(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
 // ---------------------------------------------------------------------------
 // Real tiny binary assets (generated/embedded — no Node Buffer).
 // ---------------------------------------------------------------------------
@@ -444,6 +455,27 @@ async function recentProbes(limit = 200): Promise<ProbeRecord[]> {
   return out;
 }
 
+// Correlate an unsolicited probe to a homepage trace. The same crawler that
+// fetches /robots.txt usually also loads / (minting a trace) from the same IP
+// with the same UA, often within a short window. We match on UA+IP and pick the
+// trace closest in time. Returns the trace and how far apart they were (ms),
+// or null when no plausible same-agent trace exists.
+const CORRELATE_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+function correlateProbe(
+  probe: ProbeRecord,
+  traces: TraceStats[],
+): { trace: TraceStats; deltaMs: number } | null {
+  let best: { trace: TraceStats; deltaMs: number } | null = null;
+  for (const t of traces) {
+    if (t.ip !== probe.ip) continue;
+    if ((t.ua || "") !== (probe.ua || "")) continue;
+    const deltaMs = Math.abs(t.ts - probe.ts);
+    if (deltaMs > CORRELATE_WINDOW_MS) continue;
+    if (!best || deltaMs < best.deltaMs) best = { trace: t, deltaMs };
+  }
+  return best;
+}
+
 // ---------------------------------------------------------------------------
 // HTML rendering (page chrome inline — replicating aifoc.us look)
 // ---------------------------------------------------------------------------
@@ -671,18 +703,24 @@ function quickLinks(opts: { currentId?: string; origin?: string }): string {
     </div>
   </div>`;
 
+  // Each pill is a FILTER: it opens the probe log showing every request that
+  // asked for that path, not a link that visits the file itself.
+  const pathPill = (path: string, label: string) =>
+    pill(`/traces?path=${encodeURIComponent(path)}#unsolicited`, "doc", label);
   const wellKnownGroup = `
   <div class="qn-group">
-    <span class="qn-label">Well-known &amp; agent files (visiting one logs a probe you can then reverse-look-up)</span>
+    <span class="qn-label">Well-known &amp; agent files — see every request that asked for each path</span>
     <div class="qn-pills">
-      ${pill("/traces#unsolicited", "globe", "Unsolicited probe log")}
-      ${pill("/robots.txt", "doc", "robots.txt")}
-      ${pill("/sitemap.xml", "doc", "sitemap.xml")}
-      ${pill("/llms.txt", "doc", "llms.txt")}
-      ${pill("/.well-known/security.txt", "doc", "security.txt")}
-      ${pill("/.well-known/ai-plugin.json", "doc", "ai-plugin.json")}
-      ${pill("/ai.txt", "doc", "ai.txt")}
-      ${pill("/humans.txt", "doc", "humans.txt")}
+      ${pill("/traces#unsolicited", "globe", "All unsolicited requests")}
+      ${pathPill("/robots.txt", "robots.txt")}
+      ${pathPill("/sitemap.xml", "sitemap.xml")}
+      ${pathPill("/llms.txt", "llms.txt")}
+      ${pathPill("/.well-known/", ".well-known/*")}
+      ${pathPill("/security.txt", "security.txt")}
+      ${pathPill("/ai-plugin.json", "ai-plugin.json")}
+      ${pathPill("/ai.txt", "ai.txt")}
+      ${pathPill("/humans.txt", "humans.txt")}
+      ${pathPill("/favicon.ico", "favicon.ico")}
     </div>
   </div>`;
 
@@ -1448,6 +1486,7 @@ function tracesUrl(uaFilter: string, uap: number, p: number): string {
 
 interface TracesOpts {
   traces: TraceStats[]; // full filtered list
+  allTraces: TraceStats[]; // unfiltered, for probe→trace correlation
   uaEntries: [string, { count: number; jsRan: number }][]; // full sorted
   uaFilter: string;
   pathFilter: string;
@@ -1461,6 +1500,7 @@ interface TracesOpts {
 function tracesPageHtml(opts: TracesOpts): string {
   const {
     traces,
+    allTraces,
     uaEntries,
     uaFilter,
     pathFilter,
@@ -1525,6 +1565,16 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, p, re
 
   const probeRows = probes.slice(0, 200).map((pr) => {
     const ua = pr.ua || "(no user-agent)";
+    const rel = correlateProbe(pr, allTraces);
+    const relCell = rel
+      ? `<a href="/trace/${escapeHtml(rel.trace.id)}" title="Same UA+IP loaded / ${
+        rel.deltaMs === 0
+          ? "at the same moment"
+          : `${fmtDelta(rel.deltaMs)} ${rel.trace.ts >= pr.ts ? "after" : "before"} this probe`
+      }"><code>${escapeHtml(rel.trace.id)}</code> <span class="muted">(${
+        rel.trace.ts >= pr.ts ? "+" : "−"
+      }${fmtDelta(rel.deltaMs)})</span></a>`
+      : `<span class="muted">—</span>`;
     return `<tr>
   <td class="mono">${fmtTs(pr.ts)}</td>
   <td class="mono"><a href="${probeFilterUrl(uaFilter, pr.path)}" title="Filter to this path">${
@@ -1536,11 +1586,12 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, p, re
       escapeHtml(pr.ua || "—")
     }</a></td>
   <td class="mono">${escapeHtml(pr.ip)}</td>
+  <td class="mono">${relCell}</td>
 </tr>`;
   }).join("\n");
   const probesSection = probes.length
     ? `<div class="scrollx"><table>
-<thead><tr><th>Timestamp</th><th>Path</th><th>User Agent (click for reverse lookup)</th><th>IP</th></tr></thead>
+<thead><tr><th>Timestamp</th><th>Path</th><th>User Agent (click for reverse lookup)</th><th>IP</th><th>Related trace</th></tr></thead>
 <tbody>${probeRows}</tbody>
 </table></div>`
     : `<p class="empty">No unsolicited probe requests${
@@ -1605,6 +1656,9 @@ that UA did.</p>
 ${pathSummary}
 
 <h3>Requests (${probes.length} shown)</h3>
+<p>The <strong>Related trace</strong> column links a probe to a homepage trace from the same
+user agent and IP within 30 minutes (the same crawler that fetched a well-known file usually also
+loaded <code>/</code>). The offset shows how long before/after the probe that trace was minted.</p>
 ${probesSection}
 <p style="margin-top:1.5em"><a href="/">← back to the live tracer (mints a new trace)</a></p>`;
   return pageShell("recent traces · ua-tracer", body);
@@ -1660,6 +1714,7 @@ async function handleTraces(req: Request): Promise<Response> {
   return new Response(
     tracesPageHtml({
       traces: filtered,
+      allTraces,
       uaEntries,
       uaFilter,
       pathFilter,
@@ -1885,12 +1940,8 @@ function wellKnownResponse(path: string, origin: string): Response | null {
   if (p === "/robots.txt") {
     return txt(`User-agent: *\nAllow: /\nSitemap: ${origin}/sitemap.xml\n`);
   }
-  if (p === "/sitemap.xml" || p === "/sitemap_index.xml") {
-    return new Response(
-      `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${origin}/</loc></url></urlset>\n`,
-      { headers: noStore({ "content-type": "application/xml; charset=utf-8" }) },
-    );
-  }
+  // NOTE: /sitemap.xml is handled in the router (it is async — it reads recent
+  // traces to build a real sitemap), not here.
   if (p === "/llms.txt" || p === "/llms-full.txt") {
     return txt(
       `# ua-tracer\n\nSee what a user agent fetches, follows, and executes.\n\n- ${origin}/\n`,
@@ -1903,6 +1954,85 @@ function wellKnownResponse(path: string, origin: string): Response | null {
     return txt("ua-tracer: this path is tracked but not otherwise served.\n");
   }
   return null;
+}
+
+// A real sitemap: the home and traces pages, interesting filter views, and the
+// most recent trace-detail pages. Built dynamically from KV so it stays current.
+async function buildSitemap(origin: string): Promise<string> {
+  const recent = await recentTraces(200);
+  const now = new Date().toISOString();
+  const urls: { loc: string; priority: string; lastmod?: string }[] = [];
+
+  // Core pages. (No #fragment URLs — sitemaps ignore fragments.)
+  urls.push({ loc: `${origin}/`, priority: "1.0", lastmod: now });
+  urls.push({ loc: `${origin}/traces`, priority: "0.9", lastmod: now });
+
+  // Interesting filter views: well-known paths and notable crawlers.
+  const wellKnownPaths = [
+    "/robots.txt",
+    "/sitemap.xml",
+    "/llms.txt",
+    "/.well-known/",
+    "/security.txt",
+    "/ai-plugin.json",
+    "/ai.txt",
+    "/humans.txt",
+    "/favicon.ico",
+  ];
+  for (const wk of wellKnownPaths) {
+    urls.push({
+      loc: `${origin}/traces?path=${encodeURIComponent(wk)}`,
+      priority: "0.5",
+    });
+  }
+  // Notable crawler filters (from observed UAs plus a known list).
+  const knownBots = [
+    "Googlebot",
+    "GPTBot",
+    "ClaudeBot",
+    "Claude-Web",
+    "PerplexityBot",
+    "Bingbot",
+    "Bytespider",
+    "Amazonbot",
+    "CCBot",
+    "Applebot",
+    "facebookexternalhit",
+  ];
+  const seenBots = new Set<string>(knownBots);
+  for (const t of recent) {
+    const ua = t.ua || "";
+    // Pull a coarse bot token out of observed UAs so the sitemap reflects
+    // whatever has actually been hitting the site.
+    const m = ua.match(/([A-Za-z][A-Za-z0-9-]*[Bb]ot)/);
+    if (m) seenBots.add(m[1]);
+  }
+  for (const bot of seenBots) {
+    urls.push({
+      loc: `${origin}/traces?ua=${encodeURIComponent(bot)}`,
+      priority: "0.4",
+    });
+  }
+
+  // The most recent trace-detail pages (cap to keep the sitemap lean).
+  for (const t of recent.slice(0, 50)) {
+    urls.push({
+      loc: `${origin}/trace/${encodeURIComponent(t.id)}`,
+      priority: "0.3",
+      lastmod: new Date(t.ts).toISOString(),
+    });
+  }
+
+  const body = urls.map((u) =>
+    `  <url><loc>${escapeHtml(u.loc)}</loc>${
+      u.lastmod ? `<lastmod>${u.lastmod}</lastmod>` : ""
+    }<priority>${u.priority}</priority></url>`
+  ).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${body}
+</urlset>
+`;
 }
 
 async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
@@ -1954,11 +2084,22 @@ async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Resp
     return await handleHomepage(req, ip);
   }
 
-  // Unsolicited probe paths (robots, sitemap, /.well-known/*, llms.txt, …): a UA
-  // may fetch these on its own initiative. Log + serve a sensible response.
   const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? url.host;
   const proto = req.headers.get("x-forwarded-proto") ?? url.protocol.replace(":", "");
-  const probeResp = wellKnownResponse(path, `${proto}://${host}`);
+  const origin = `${proto}://${host}`;
+
+  // Real, dynamic sitemap (home, /traces, interesting filters, recent traces).
+  // Also logged as a probe so we can see which UAs request the sitemap.
+  if (path === "/sitemap.xml" || path === "/sitemap_index.xml") {
+    await logProbe(path, req, ip);
+    return new Response(await buildSitemap(origin), {
+      headers: noStore({ "content-type": "application/xml; charset=utf-8" }),
+    });
+  }
+
+  // Unsolicited probe paths (robots, /.well-known/*, llms.txt, …): a UA may
+  // fetch these on its own initiative. Log + serve a sensible response.
+  const probeResp = wellKnownResponse(path, origin);
   if (probeResp) {
     await logProbe(path, req, ip);
     return probeResp;

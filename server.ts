@@ -434,10 +434,14 @@ tr:hover td { background: var(--bg-secondary); }
   font-family: -apple-system, sans-serif; font-weight: 600; border: 1px solid var(--border); }
 .badge.yes { background: #d8f5d8; color: #14532d; border-color: #9fd9a0; }
 .badge.no { background: #f5dada; color: #7f1d1d; border-color: #e0a3a3; }
-.badge.kind { background: var(--bg-secondary); color: var(--color); }
+/* Kind pills mark a sub-resource the UA actually fetched/triggered, so they
+   read as positive (green), like the "JS ran" badge. Absence of a pill means
+   the UA did not fetch that resource. */
+.badge.kind { background: #d8f5d8; color: #14532d; border-color: #9fd9a0; }
 @media (prefers-color-scheme: dark) {
   .badge.yes { background: #16351a; color: #b6e8bb; border-color: #2f6b35; }
   .badge.no { background: #3a1717; color: #f0b4b4; border-color: #6b2f2f; }
+  .badge.kind { background: #16351a; color: #b6e8bb; border-color: #2f6b35; }
 }
 .kinds { display: flex; gap: 0.4em; flex-wrap: wrap; }
 .delta { color: var(--muted); font-variant-numeric: tabular-nums; }

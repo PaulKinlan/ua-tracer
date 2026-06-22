@@ -990,6 +990,103 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
   );
 }
 
+// /traces — a read-only list of recent homepage requests. Unlike "/", it does
+// NOT mint a new trace or reference any probe assets, so you can browse the log
+// without adding noise. Quick-access bookmark for "show me everything recent".
+function tracesPageHtml(
+  traces: TraceStats[],
+  uaGroups: Map<string, { count: number; jsRan: number }>,
+  uaFilter: string,
+  totalTraces: number,
+): string {
+  const rows = traces.map((t) =>
+    `<tr>
+  <td class="mono"><a href="/trace/${escapeHtml(t.id)}">${fmtTs(t.ts)}</a></td>
+  <td><span class="ua" title="${escapeHtml(t.ua)}">${escapeHtml(t.ua || "—")}</span></td>
+  <td class="mono">${escapeHtml(t.ip)}</td>
+  <td class="mono">${t.assetCount}</td>
+  <td>${
+      t.jsRan ? '<span class="badge yes">JS ran</span>' : '<span class="badge no">no JS</span>'
+    }</td>
+</tr>`
+  ).join("\n");
+  const table = traces.length
+    ? `<table>
+<thead><tr><th>Timestamp</th><th>User Agent</th><th>IP</th><th>Assets</th><th>JS?</th></tr></thead>
+<tbody>${rows}</tbody>
+</table>`
+    : `<p class="empty">${
+      uaFilter
+        ? `No homepage requests match <code>${escapeHtml(uaFilter)}</code>.`
+        : "No traces recorded yet."
+    }</p>`;
+  const uaRows = [...uaGroups.entries()]
+    .sort((a, b) => b[1].count - a[1].count)
+    .map(([ua, g]) => {
+      const short = ua.length > 70 ? ua.slice(0, 70) + "…" : ua;
+      return `<tr>
+  <td><a href="/traces?ua=${encodeURIComponent(ua)}" class="ua" title="${escapeHtml(ua)}">${
+        escapeHtml(short)
+      }</a></td>
+  <td class="mono">${g.count}</td>
+  <td class="mono">${g.jsRan}</td>
+</tr>`;
+    }).join("\n");
+  const uaSummary = uaGroups.size
+    ? `<table>
+<thead><tr><th>User Agent</th><th>Requests</th><th>JS ran</th></tr></thead>
+<tbody>${uaRows}</tbody>
+</table>`
+    : `<p class="empty">No user agents seen yet.</p>`;
+  const filterBar = `
+<form method="get" action="/traces" class="filter-bar">
+  <input type="search" name="ua" value="${
+    escapeHtml(uaFilter)
+  }" placeholder="filter by user-agent substring, e.g. ClaudeBot" aria-label="Filter by user agent">
+  <button type="submit">Filter</button>
+  ${uaFilter ? `<a href="/traces" class="clear-filter">clear</a>` : ""}
+</form>`;
+  const body = `
+<section class="explainer">
+<p>All recent homepage requests, newest first. This page does <strong>not</strong> mint a new
+trace (unlike <a href="/">/</a>), so you can browse the log without adding noise.</p>
+</section>
+
+<h2>By user agent</h2>
+<p>Running counts across the last ${totalTraces} homepage requests. Click one to filter.</p>
+${uaSummary}
+
+<h2>Recent homepage requests</h2>
+<p>Each row is one load of <code>/</code> by some user agent.${
+    uaFilter ? ` Filtered to <code>${escapeHtml(uaFilter)}</code>.` : ""
+  }</p>
+${filterBar}
+${table}
+<p style="margin-top:1.5em"><a href="/">← back to the live tracer (mints a new trace)</a></p>`;
+  return pageShell("recent traces · ua-tracer", body);
+}
+
+async function handleTraces(req: Request): Promise<Response> {
+  const uaFilter = new URL(req.url).searchParams.get("ua")?.trim() ?? "";
+  const allTraces = await recentTraces(200);
+  const uaGroups = new Map<string, { count: number; jsRan: number }>();
+  for (const t of allTraces) {
+    const key = t.ua || "(no user-agent)";
+    const g = uaGroups.get(key) ?? { count: 0, jsRan: 0 };
+    g.count++;
+    if (t.jsRan) g.jsRan++;
+    uaGroups.set(key, g);
+  }
+  const filtered = uaFilter
+    ? allTraces.filter((t) => (t.ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
+    : allTraces;
+  console.log(`[traces] list view: ${allTraces.length} traces, filter="${uaFilter}"`);
+  return new Response(
+    tracesPageHtml(filtered.slice(0, 100), uaGroups, uaFilter, allTraces.length),
+    { headers: noStore({ "content-type": "text/html; charset=utf-8" }) },
+  );
+}
+
 const KIND_LABEL: Record<AssetKind, string> = {
   homepage: "homepage",
   css: "CSS",
@@ -1192,6 +1289,11 @@ async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Resp
   const traceMatch = path.match(/^\/trace\/([^/]+)$/);
   if (traceMatch) {
     return await handleTrace(traceMatch[1]);
+  }
+
+  // Read-only recent-traces list (does NOT mint a new trace).
+  if ((path === "/traces" || path === "/traces/") && req.method === "GET") {
+    return await handleTraces(req);
   }
 
   // Homepage.

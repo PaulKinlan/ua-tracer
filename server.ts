@@ -472,6 +472,20 @@ tr.headers-row pre.headers { margin-top: 0.5em; max-width: 100%; }
 pre.headers { font-family: SFMono-Regular, Consolas, Menlo, monospace; font-size: 0.78em;
   background: var(--bg-secondary); padding: 0.8em; border-radius: 4px; overflow-x: auto; margin-top: 0.4em;
   white-space: pre-wrap; word-break: break-all; }
+.pager { display: flex; gap: 1em; align-items: center; margin: 0.6em 0; font-size: 0.9em; flex-wrap: wrap; }
+.pager .muted { color: var(--muted); }
+.scrollx { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
+.kinds-cell { display: flex; gap: 0.3em; flex-wrap: wrap; }
+.kinds-cell .badge.kind { font-weight: 500; font-size: 0.72em; }
+.see-all { font-size: 0.9em; }
+@media (max-width: 640px) {
+  main { padding: 1.2em 0.7em 3em; }
+  table { font-size: 0.8em; }
+  th, td { padding: 0.4em 0.4em; }
+  .ua { max-width: 150px; }
+  .site-branding-title { font-size: 1.6em; }
+  .filter-bar input[type="search"] { min-width: 0; }
+}
 `;
 
 function pageShell(title: string, body: string): string {
@@ -502,6 +516,65 @@ ${body}
 </body>
 </html>`;
 }
+
+// Short labels for the per-trace "Fetched" sub-resource badges.
+const SHORT_KIND: Partial<Record<AssetKind, string>> = {
+  css: "CSS",
+  js: "JS",
+  module: "module",
+  img: "img",
+  font: "font",
+  "css-bg": "css-bg",
+  "css-font": "css-font",
+  favicon: "favicon",
+  "apple-icon": "apple-icon",
+  manifest: "manifest",
+  "manifest-icon": "mf-icon",
+  preload: "preload",
+  prefetch: "prefetch",
+  "og-image": "og-img",
+  "twitter-image": "twitter-img",
+};
+const KIND_ORDER: AssetKind[] = [
+  "css",
+  "js",
+  "module",
+  "img",
+  "font",
+  "css-bg",
+  "css-font",
+  "favicon",
+  "apple-icon",
+  "manifest",
+  "manifest-icon",
+  "preload",
+  "prefetch",
+  "og-image",
+  "twitter-image",
+];
+function kindBadges(kinds: AssetKind[]): string {
+  const present = KIND_ORDER.filter((k) => kinds.includes(k));
+  if (!present.length) return '<span class="muted">—</span>';
+  return present.map((k) => `<span class="badge kind">${SHORT_KIND[k] ?? k}</span>`).join("");
+}
+
+// Render a prev/next pager. `href(p)` builds the link for page p (0-based).
+function pager(page: number, total: number, size: number, href: (p: number) => string): string {
+  const pages = Math.max(1, Math.ceil(total / size));
+  if (pages <= 1) return "";
+  const prev = page > 0
+    ? `<a href="${href(page - 1)}">← prev</a>`
+    : `<span class="muted">← prev</span>`;
+  const next = page < pages - 1
+    ? `<a href="${href(page + 1)}">next →</a>`
+    : `<span class="muted">next →</span>`;
+  const start = total === 0 ? 0 : page * size + 1;
+  const end = Math.min(total, (page + 1) * size);
+  return `<div class="pager">${prev}<span class="muted">${start}–${end} of ${total}</span>${next}</div>`;
+}
+
+const UA_PAGE_SIZE = 25;
+const REQ_PAGE_SIZE = 50;
 
 interface HomepageOpts {
   id: string;
@@ -536,23 +609,32 @@ function homepageHtml(opts: HomepageOpts): string {
 <meta name="twitter:description" content="See what a user agent downloads, follows, and executes.">
 <meta name="twitter:image" content="${origin}${base}/twitter-image.png">
 `;
-  const rows = traces.map((t) => {
-    const ran = t.jsRan;
-    const count = t.assetCount;
-    return `<tr>
+  // Homepage shows a bounded preview (paging lives on /traces, which does not
+  // mint a trace on each navigation).
+  const shownTraces = traces.slice(0, REQ_PAGE_SIZE);
+  const rows = shownTraces.map((t) =>
+    `<tr>
   <td class="mono"><a href="/trace/${escapeHtml(t.id)}">${fmtTs(t.ts)}</a></td>
   <td><span class="ua" title="${escapeHtml(t.ua)}">${escapeHtml(t.ua || "—")}</span></td>
   <td class="mono">${escapeHtml(t.ip)}</td>
-  <td class="mono">${count}</td>
-  <td>${ran ? '<span class="badge yes">JS ran</span>' : '<span class="badge no">no JS</span>'}</td>
-</tr>`;
-  }).join("\n");
+  <td class="mono">${t.assetCount}</td>
+  <td><div class="kinds-cell">${kindBadges(t.kinds)}</div></td>
+  <td>${
+      t.jsRan ? '<span class="badge yes">JS ran</span>' : '<span class="badge no">no JS</span>'
+    }</td>
+</tr>`
+  ).join("\n");
 
+  const tracesHref = uaFilter ? `/traces?ua=${encodeURIComponent(uaFilter)}` : "/traces";
   const table = traces.length
-    ? `<table>
-<thead><tr><th>Timestamp</th><th>User Agent</th><th>IP</th><th>Assets</th><th>JS?</th></tr></thead>
+    ? `<div class="scrollx"><table>
+<thead><tr><th>Timestamp</th><th>User Agent</th><th>IP</th><th>Assets</th><th>Fetched</th><th>JS?</th></tr></thead>
 <tbody>${rows}</tbody>
-</table>`
+</table></div>${
+      traces.length > REQ_PAGE_SIZE
+        ? `<p class="see-all"><a href="${tracesHref}">View all recent requests (paged) →</a></p>`
+        : ""
+    }`
     : `<p class="empty">${
       uaFilter
         ? `No homepage requests match user-agent filter <code>${escapeHtml(uaFilter)}</code>.`
@@ -563,24 +645,27 @@ function homepageHtml(opts: HomepageOpts): string {
 
   // Per-UA summary: running counts grouped by exact UA string, newest activity
   // surfaced as a leaderboard. Each row links to the filtered view.
-  const uaRows = [...uaGroups.entries()]
-    .sort((a, b) => b[1].count - a[1].count)
-    .map(([ua, g]) => {
-      const short = ua.length > 70 ? ua.slice(0, 70) + "…" : ua;
-      return `<tr>
+  const uaEntries = [...uaGroups.entries()].sort((a, b) => b[1].count - a[1].count);
+  const uaRows = uaEntries.slice(0, UA_PAGE_SIZE).map(([ua, g]) => {
+    const short = ua.length > 70 ? ua.slice(0, 70) + "…" : ua;
+    return `<tr>
   <td><a href="/?ua=${encodeURIComponent(ua)}" class="ua" title="${escapeHtml(ua)}">${
-        escapeHtml(short)
-      }</a></td>
+      escapeHtml(short)
+    }</a></td>
   <td class="mono">${g.count}</td>
   <td class="mono">${g.jsRan}</td>
 </tr>`;
-    }).join("\n");
+  }).join("\n");
 
   const uaSummary = uaGroups.size
-    ? `<table>
+    ? `<div class="scrollx"><table>
 <thead><tr><th>User Agent</th><th>Requests</th><th>JS ran</th></tr></thead>
 <tbody>${uaRows}</tbody>
-</table>`
+</table></div>${
+      uaEntries.length > UA_PAGE_SIZE
+        ? `<p class="see-all"><a href="/traces">View all ${uaEntries.length} user agents (paged) →</a></p>`
+        : ""
+    }`
     : `<p class="empty">No user agents seen yet.</p>`;
 
   const filterBar = `
@@ -993,51 +1078,73 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
 // /traces — a read-only list of recent homepage requests. Unlike "/", it does
 // NOT mint a new trace or reference any probe assets, so you can browse the log
 // without adding noise. Quick-access bookmark for "show me everything recent".
-function tracesPageHtml(
-  traces: TraceStats[],
-  uaGroups: Map<string, { count: number; jsRan: number }>,
-  uaFilter: string,
-  totalTraces: number,
-): string {
-  const rows = traces.map((t) =>
+function tracesUrl(uaFilter: string, uap: number, p: number): string {
+  const params = new URLSearchParams();
+  if (uaFilter) params.set("ua", uaFilter);
+  if (uap) params.set("uap", String(uap));
+  if (p) params.set("p", String(p));
+  const qs = params.toString();
+  return qs ? `/traces?${qs}` : "/traces";
+}
+
+interface TracesOpts {
+  traces: TraceStats[]; // full filtered list
+  uaEntries: [string, { count: number; jsRan: number }][]; // full sorted
+  uaFilter: string;
+  totalTraces: number;
+  uaPage: number;
+  reqPage: number;
+}
+
+function tracesPageHtml(opts: TracesOpts): string {
+  const { traces, uaEntries, uaFilter, totalTraces, uaPage, reqPage } = opts;
+
+  // Recent requests, paged.
+  const reqSlice = traces.slice(reqPage * REQ_PAGE_SIZE, (reqPage + 1) * REQ_PAGE_SIZE);
+  const rows = reqSlice.map((t) =>
     `<tr>
   <td class="mono"><a href="/trace/${escapeHtml(t.id)}">${fmtTs(t.ts)}</a></td>
   <td><span class="ua" title="${escapeHtml(t.ua)}">${escapeHtml(t.ua || "—")}</span></td>
   <td class="mono">${escapeHtml(t.ip)}</td>
   <td class="mono">${t.assetCount}</td>
+  <td><div class="kinds-cell">${kindBadges(t.kinds)}</div></td>
   <td>${
       t.jsRan ? '<span class="badge yes">JS ran</span>' : '<span class="badge no">no JS</span>'
     }</td>
 </tr>`
   ).join("\n");
   const table = traces.length
-    ? `<table>
-<thead><tr><th>Timestamp</th><th>User Agent</th><th>IP</th><th>Assets</th><th>JS?</th></tr></thead>
+    ? `<div class="scrollx"><table>
+<thead><tr><th>Timestamp</th><th>User Agent</th><th>IP</th><th>Assets</th><th>Fetched</th><th>JS?</th></tr></thead>
 <tbody>${rows}</tbody>
-</table>`
+</table></div>
+${pager(reqPage, traces.length, REQ_PAGE_SIZE, (p) => tracesUrl(uaFilter, uaPage, p))}`
     : `<p class="empty">${
       uaFilter
         ? `No homepage requests match <code>${escapeHtml(uaFilter)}</code>.`
         : "No traces recorded yet."
     }</p>`;
-  const uaRows = [...uaGroups.entries()]
-    .sort((a, b) => b[1].count - a[1].count)
-    .map(([ua, g]) => {
-      const short = ua.length > 70 ? ua.slice(0, 70) + "…" : ua;
-      return `<tr>
+
+  // By user agent, paged.
+  const uaSlice = uaEntries.slice(uaPage * UA_PAGE_SIZE, (uaPage + 1) * UA_PAGE_SIZE);
+  const uaRows = uaSlice.map(([ua, g]) => {
+    const short = ua.length > 70 ? ua.slice(0, 70) + "…" : ua;
+    return `<tr>
   <td><a href="/traces?ua=${encodeURIComponent(ua)}" class="ua" title="${escapeHtml(ua)}">${
-        escapeHtml(short)
-      }</a></td>
+      escapeHtml(short)
+    }</a></td>
   <td class="mono">${g.count}</td>
   <td class="mono">${g.jsRan}</td>
 </tr>`;
-    }).join("\n");
-  const uaSummary = uaGroups.size
-    ? `<table>
+  }).join("\n");
+  const uaSummary = uaEntries.length
+    ? `<div class="scrollx"><table>
 <thead><tr><th>User Agent</th><th>Requests</th><th>JS ran</th></tr></thead>
 <tbody>${uaRows}</tbody>
-</table>`
+</table></div>
+${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, p, reqPage))}`
     : `<p class="empty">No user agents seen yet.</p>`;
+
   const filterBar = `
 <form method="get" action="/traces" class="filter-bar">
   <input type="search" name="ua" value="${
@@ -1053,21 +1160,25 @@ trace (unlike <a href="/">/</a>), so you can browse the log without adding noise
 </section>
 
 <h2>By user agent</h2>
-<p>Running counts across the last ${totalTraces} homepage requests. Click one to filter.</p>
+<p>Running counts across the last ${totalTraces} homepage requests (${uaEntries.length} distinct
+agents). Click one to filter.</p>
+${filterBar}
 ${uaSummary}
 
 <h2>Recent homepage requests</h2>
 <p>Each row is one load of <code>/</code> by some user agent.${
     uaFilter ? ` Filtered to <code>${escapeHtml(uaFilter)}</code>.` : ""
   }</p>
-${filterBar}
 ${table}
 <p style="margin-top:1.5em"><a href="/">← back to the live tracer (mints a new trace)</a></p>`;
   return pageShell("recent traces · ua-tracer", body);
 }
 
 async function handleTraces(req: Request): Promise<Response> {
-  const uaFilter = new URL(req.url).searchParams.get("ua")?.trim() ?? "";
+  const url = new URL(req.url);
+  const uaFilter = url.searchParams.get("ua")?.trim() ?? "";
+  const uaPage = Math.max(0, parseInt(url.searchParams.get("uap") ?? "0", 10) || 0);
+  const reqPage = Math.max(0, parseInt(url.searchParams.get("p") ?? "0", 10) || 0);
   const allTraces = await recentTraces(200);
   const uaGroups = new Map<string, { count: number; jsRan: number }>();
   for (const t of allTraces) {
@@ -1077,12 +1188,22 @@ async function handleTraces(req: Request): Promise<Response> {
     if (t.jsRan) g.jsRan++;
     uaGroups.set(key, g);
   }
+  const uaEntries = [...uaGroups.entries()].sort((a, b) => b[1].count - a[1].count);
   const filtered = uaFilter
     ? allTraces.filter((t) => (t.ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
     : allTraces;
-  console.log(`[traces] list view: ${allTraces.length} traces, filter="${uaFilter}"`);
+  console.log(
+    `[traces] list: ${allTraces.length} traces, ${uaEntries.length} UAs, filter="${uaFilter}" uap=${uaPage} p=${reqPage}`,
+  );
   return new Response(
-    tracesPageHtml(filtered.slice(0, 100), uaGroups, uaFilter, allTraces.length),
+    tracesPageHtml({
+      traces: filtered,
+      uaEntries,
+      uaFilter,
+      totalTraces: allTraces.length,
+      uaPage,
+      reqPage,
+    }),
     { headers: noStore({ "content-type": "text/html; charset=utf-8" }) },
   );
 }

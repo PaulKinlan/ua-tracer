@@ -39,7 +39,17 @@ type AssetKind =
   | "css-bg"
   | "css-font"
   | "js-ran"
-  | "timing";
+  | "timing"
+  | "favicon"
+  | "apple-icon"
+  | "manifest"
+  | "manifest-icon"
+  | "preload"
+  | "prefetch"
+  | "module"
+  | "module-ran"
+  | "og-image"
+  | "twitter-image";
 
 interface HitRecord {
   id: string; // trace id
@@ -248,6 +258,11 @@ const WOFF2_FONT = decodeBase64(
   "d09GMgABAAAAAAEMAAoAAAAAAmgAAADFAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAABmAANAoALAsGAAE2AiQDBgQgBXIHJhvXAWCeBXY7BzUWYqInhqK5en6X4vnvL3bue3+ngo2Wlj5QmKYUcBoINTu+HpTbxBCidOWVZ0VQjq0feI6n9T9OfXidHEcUceaBnY8SWCB+0oCi5oFurL4clsRyxCxO1DnztRjkgb2yME26CQqNTQs2w8QwBPPPi00AFMSK4yIIn2N/4a/dB/xmYXBNKxB6ipyAANNaEBSAQiDRU0CsCCgXq5ZxE7tNUcrd463chs7fCfStqE+0IglyGD48mw0WyiXowMABAA==",
 );
 
+// A real 16x16 ICO favicon (valid image/x-icon), built offline with Pillow.
+const ICO_FAVICON = decodeBase64(
+  "AAABAAEAEBAAAAAAIABWAAAAFgAAAIlQTkcNChoKAAAADUlIRFIAAAAQAAAAEAgGAAAAH/P/YQAAAB1JREFUeJxjTE77+J+BAsBEieZRA0YNGDVgMBkAAE1HAtnWJSmuAAAAAElFTkSuQmCC",
+);
+
 // ---------------------------------------------------------------------------
 // Logging of hits
 // ---------------------------------------------------------------------------
@@ -380,7 +395,19 @@ footer { max-width: 860px; margin: 2em auto 3em; padding-top: 1em; border-top: 1
 code { font-family: SFMono-Regular, Consolas, Menlo, monospace; background: var(--bg-secondary);
   padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.9em; }
 .empty { color: var(--muted); font-style: italic; }
+.filter-bar { display: flex; gap: 0.5em; align-items: center; margin: 0.6em 0 1em; flex-wrap: wrap; }
+.filter-bar input[type="search"] { flex: 1; min-width: 240px; padding: 0.5em 0.7em;
+  font-size: 0.95em; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--background); color: var(--color); }
+.filter-bar button { padding: 0.5em 1.1em; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-secondary); color: var(--color); cursor: pointer; font-size: 0.95em; }
+.filter-bar button:hover { background: var(--border); }
+.filter-bar .clear-filter { font-size: 0.9em; color: var(--muted); }
 details summary { cursor: pointer; color: var(--muted); font-size: 0.85em; }
+/* The headers expando renders as a full-width row beneath its request row. */
+tr.headers-row td { border-top: none; padding-top: 0; padding-bottom: 0.4em; }
+tr.headers-row:hover td { background: transparent; }
+tr.headers-row pre.headers { margin-top: 0.5em; max-width: 100%; }
 pre.headers { font-family: SFMono-Regular, Consolas, Menlo, monospace; font-size: 0.78em;
   background: var(--bg-secondary); padding: 0.8em; border-radius: 4px; overflow-x: auto; margin-top: 0.4em;
   white-space: pre-wrap; word-break: break-all; }
@@ -415,17 +442,40 @@ ${body}
 </html>`;
 }
 
-function homepageHtml(
-  id: string,
-  traces: TraceRecord[],
-  jsRanByTrace: Map<string, boolean>,
-  countByTrace: Map<string, number>,
-): string {
+interface HomepageOpts {
+  id: string;
+  origin: string;
+  traces: TraceRecord[];
+  jsRanByTrace: Map<string, boolean>;
+  countByTrace: Map<string, number>;
+  uaGroups: Map<string, { count: number; jsRan: number }>;
+  uaFilter: string;
+  totalTraces: number;
+}
+
+function homepageHtml(opts: HomepageOpts): string {
+  const { id, origin, traces, jsRanByTrace, countByTrace, uaGroups, uaFilter, totalTraces } = opts;
   const base = `/r/${id}`;
   // Probe assets all reference {id}. Page chrome styling is INLINE only.
+  // These <head> links exercise: stylesheet, font preload, favicon,
+  // apple-touch-icon, web app manifest, speculative preload/prefetch.
   const probeHead = `
 <link rel="stylesheet" href="${base}/style.css">
 <link rel="preload" as="font" type="font/woff2" href="${base}/font.woff2" crossorigin>
+<link rel="icon" type="image/x-icon" href="${base}/favicon.ico">
+<link rel="apple-touch-icon" href="${base}/apple-touch-icon.png">
+<link rel="manifest" href="${base}/manifest.json">
+<link rel="preload" as="image" href="${base}/preload.png">
+<link rel="prefetch" href="${base}/prefetch.png">
+<meta property="og:title" content="ua-tracer">
+<meta property="og:description" content="See what a user agent downloads, follows, and executes.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="${origin}${base}/og-image.png">
+<meta property="og:url" content="${origin}/">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="ua-tracer">
+<meta name="twitter:description" content="See what a user agent downloads, follows, and executes.">
+<meta name="twitter:image" content="${origin}${base}/twitter-image.png">
 `;
   const rows = traces.map((t) => {
     const ran = jsRanByTrace.get(t.id);
@@ -444,9 +494,44 @@ function homepageHtml(
 <thead><tr><th>Timestamp</th><th>User Agent</th><th>IP</th><th>Assets</th><th>JS?</th></tr></thead>
 <tbody>${rows}</tbody>
 </table>`
-    : `<p class="empty">No traces recorded yet. This very page load just created one (<code>${
-      escapeHtml(id)
-    }</code>) — reload to see it.</p>`;
+    : `<p class="empty">${
+      uaFilter
+        ? `No homepage requests match user-agent filter <code>${escapeHtml(uaFilter)}</code>.`
+        : `No traces recorded yet. This very page load just created one (<code>${
+          escapeHtml(id)
+        }</code>) — reload to see it.`
+    }</p>`;
+
+  // Per-UA summary: running counts grouped by exact UA string, newest activity
+  // surfaced as a leaderboard. Each row links to the filtered view.
+  const uaRows = [...uaGroups.entries()]
+    .sort((a, b) => b[1].count - a[1].count)
+    .map(([ua, g]) => {
+      const short = ua.length > 70 ? ua.slice(0, 70) + "…" : ua;
+      return `<tr>
+  <td><a href="/?ua=${encodeURIComponent(ua)}" class="ua" title="${escapeHtml(ua)}">${
+        escapeHtml(short)
+      }</a></td>
+  <td class="mono">${g.count}</td>
+  <td class="mono">${g.jsRan}</td>
+</tr>`;
+    }).join("\n");
+
+  const uaSummary = uaGroups.size
+    ? `<table>
+<thead><tr><th>User Agent</th><th>Requests</th><th>JS ran</th></tr></thead>
+<tbody>${uaRows}</tbody>
+</table>`
+    : `<p class="empty">No user agents seen yet.</p>`;
+
+  const filterBar = `
+<form method="get" action="/" class="filter-bar">
+  <input type="search" name="ua" value="${
+    escapeHtml(uaFilter)
+  }" placeholder="filter by user-agent substring, e.g. ClaudeBot" aria-label="Filter by user agent">
+  <button type="submit">Filter</button>
+  ${uaFilter ? `<a href="/" class="clear-filter">clear</a>` : ""}
+</form>`;
 
   const body = `
 <section class="explainer">
@@ -456,17 +541,38 @@ lives under <code>/r/${
   }/…</code>, so each fetch is tied back to <em>this</em> request and
 your User-Agent. Layered probes inside the CSS and JS reveal whether your UA parses CSS, follows
 resources linked from CSS, and actually executes JavaScript.</p>
-<p style="margin-bottom:0"><strong>Try it:</strong> point a crawler or <code>curl -A "SomeBot" </code> at this URL,
-then open the matching row below.</p>
+<p><strong>Try it:</strong> point a crawler at this URL, or run a fresh trace with curl —
+each load is its own trace:</p>
+<pre class="headers">curl -A "ClaudeBot/1.0" ${escapeHtml(origin)}/</pre>
+<p style="margin-bottom:0">…then open the matching row below. A plain <code>curl</code> only records the homepage
+hit (it parses no CSS and runs no JS) — that contrast is the whole point.</p>
 </section>
 
+<h2>By user agent</h2>
+<p>Running counts across the last ${totalTraces} homepage requests, grouped by user agent.
+Click one to filter the list below.</p>
+${uaSummary}
+
 <h2>Recent homepage requests</h2>
-<p>Newest first. Each row is a single load of <code>/</code> by some user agent.</p>
+<p>Newest first. Each row is a single load of <code>/</code> by some user agent.${
+    uaFilter ? ` Filtered to user agents containing <code>${escapeHtml(uaFilter)}</code>.` : ""
+  }</p>
+${filterBar}
 ${table}
 
 <!-- ua-tracer probe assets below: real CSS, JS, image, font, all carrying the trace id -->
-<img src="${base}/photo.png" width="1" height="1" alt="" style="position:absolute;left:-9999px">
+<!--
+  The element below carries .ua-tracer-probe so a RENDERING engine is forced to
+  fetch the CSS-linked resources: the background-image (css-bg.png) and the
+  @font-face source (css-font.woff2). Browsers fetch those lazily — only when an
+  on-screen element actually uses them — so the probe must be rendered (not
+  display:none / not removed from layout) and must contain text in the custom
+  font. We keep it visible but quiet.
+-->
+<p class="ua-tracer-probe" aria-hidden="true">This line uses the probe font and a CSS background image so we can detect whether your user agent follows resources linked from inside a stylesheet.</p>
+<img src="${base}/photo.png" width="32" height="32" alt="probe image">
 <script src="${base}/main.js"></script>
+<script type="module" src="${base}/module.js"></script>
 `;
 
   // Inject probeHead into the shell head via a marker swap.
@@ -483,17 +589,32 @@ ${table}
 function cssBody(id: string): string {
   const base = `/r/${id}`;
   // References two further probes: a background image and an @font-face source.
+  // The .ua-tracer-probe element in the page renders with this rule, which
+  // forces a real engine to fetch both CSS-linked resources:
+  //  - background-image -> css-bg.png  (only fetched for a rendered, sized box)
+  //  - font-family on text -> @font-face src css-font.woff2
+  // font-display:block (not swap) makes engines that load fonts request the
+  // woff2 promptly rather than deferring it indefinitely.
   return `/* ua-tracer probe stylesheet for trace ${id} */
 @font-face {
   font-family: "uatracerprobe";
   src: url("${base}/css-font.woff2") format("woff2");
-  font-display: swap;
+  font-display: block;
 }
 .ua-tracer-probe {
+  display: block;
+  min-height: 1.6em;
+  padding: 0.6em 0.8em;
+  margin: 1.4em 0;
+  color: var(--muted);
+  font-size: 0.95em;
+  font-family: "uatracerprobe", Georgia, serif;
   background-image: url("${base}/css-bg.png");
-  font-family: "uatracerprobe", serif;
+  background-repeat: repeat;
+  background-size: 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
-body::after { content: ""; }
 `;
 }
 
@@ -540,6 +661,51 @@ function jsBody(id: string): string {
 `;
 }
 
+function manifestBody(id: string): string {
+  const base = `/r/${id}`;
+  // A real web app manifest that references its own icon. A UA that fetches
+  // manifest-icon.png has parsed the manifest and followed a link from inside
+  // it (a second-level follow, like the CSS-linked probes).
+  return JSON.stringify(
+    {
+      name: "ua-tracer probe",
+      short_name: "ua-tracer",
+      start_url: "/",
+      display: "standalone",
+      background_color: "#fdfcf8",
+      theme_color: "#1a56b0",
+      icons: [
+        {
+          src: `${base}/manifest-icon.png`,
+          sizes: "16x16",
+          type: "image/png",
+        },
+      ],
+    },
+    null,
+    2,
+  );
+}
+
+function moduleBody(id: string): string {
+  const base = `/r/${id}`;
+  // An ES module (<script type="module">). Running it beacons module-ran.gif,
+  // proving the UA executes module-type scripts (some run classic JS but skip
+  // modules, or vice versa).
+  return `// ua-tracer ES module probe for trace ${id}
+const beacon = ${JSON.stringify(`${base}/module-ran.gif`)};
+try {
+  new Image().src = beacon + "?t=" + Date.now();
+} catch (e) {
+  // Non-DOM module runtime: fall back to fetch.
+  try {
+    fetch(beacon + "?t=" + Date.now(), { method: "GET", keepalive: true });
+  } catch (_e) { /* ignore */ }
+}
+export const ran = true;
+`;
+}
+
 // ---------------------------------------------------------------------------
 // Request handling
 // ---------------------------------------------------------------------------
@@ -571,6 +737,16 @@ async function handleAsset(
     "css-font.woff2": "css-font",
     "js-ran.gif": "js-ran",
     "timing": "timing",
+    "favicon.ico": "favicon",
+    "apple-touch-icon.png": "apple-icon",
+    "manifest.json": "manifest",
+    "manifest-icon.png": "manifest-icon",
+    "preload.png": "preload",
+    "prefetch.png": "prefetch",
+    "module.js": "module",
+    "module-ran.gif": "module-ran",
+    "og-image.png": "og-image",
+    "twitter-image.png": "twitter-image",
   };
   const kind = map[asset];
   if (!kind) {
@@ -613,6 +789,7 @@ async function handleAsset(
         headers: noStore({ "content-type": "image/png" }),
       });
     case "js-ran.gif":
+    case "module-ran.gif":
       return new Response(GIF_1x1, {
         headers: noStore({ "content-type": "image/gif" }),
       });
@@ -620,6 +797,47 @@ async function handleAsset(
     case "css-font.woff2":
       return new Response(WOFF2_FONT, {
         headers: noStore({ "content-type": "font/woff2" }),
+      });
+    case "favicon.ico":
+      // A real (tiny) ICO so the response is a valid favicon, not just a 200.
+      return new Response(ICO_FAVICON, {
+        headers: noStore({ "content-type": "image/x-icon" }),
+      });
+    case "apple-touch-icon.png":
+      return new Response(makePng(16, 16, 99, 102, 241), {
+        headers: noStore({ "content-type": "image/png" }),
+      });
+    case "preload.png":
+      return new Response(makePng(8, 8, 16, 185, 129), {
+        headers: noStore({ "content-type": "image/png" }),
+      });
+    case "prefetch.png":
+      return new Response(makePng(8, 8, 245, 158, 11), {
+        headers: noStore({ "content-type": "image/png" }),
+      });
+    case "manifest-icon.png":
+      return new Response(makePng(16, 16, 168, 85, 247), {
+        headers: noStore({ "content-type": "image/png" }),
+      });
+    case "og-image.png":
+      // Larger PNG so social unfurlers (which validate dimensions) accept it.
+      return new Response(makePng(64, 64, 26, 86, 176), {
+        headers: noStore({ "content-type": "image/png" }),
+      });
+    case "twitter-image.png":
+      return new Response(makePng(64, 64, 29, 161, 242), {
+        headers: noStore({ "content-type": "image/png" }),
+      });
+    case "manifest.json":
+      // References its own icon (manifest-icon.png) — fetching THAT proves the
+      // UA parsed the manifest and followed a resource linked from inside it.
+      return new Response(manifestBody(id), {
+        headers: noStore({ "content-type": "application/manifest+json" }),
+      });
+    case "module.js":
+      // ES module that imports module-import logic and beacons module-ran.gif.
+      return new Response(moduleBody(id), {
+        headers: noStore({ "content-type": "text/javascript; charset=utf-8" }),
       });
     case "timing":
       return new Response(JSON.stringify({ ok: true, recorded: timing?.length ?? 0 }), {
@@ -635,6 +853,12 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
   const ts = Date.now();
   const ua = req.headers.get("user-agent") ?? "";
   const headers = headersToObject(req.headers);
+  // Derive the public origin for copy-pasteable examples. Honour the proxy's
+  // forwarded host/proto (Deno Deploy sets these) and fall back to the URL.
+  const reqUrl = new URL(req.url);
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? reqUrl.host;
+  const proto = req.headers.get("x-forwarded-proto") ?? reqUrl.protocol.replace(":", "");
+  const origin = `${proto}://${host}`;
   const rec: TraceRecord = { id, ts, ua, ip, method: req.method, headers };
 
   // Persist the trace + recent index. Use reverse-sortable key for "recent"
@@ -650,20 +874,48 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
 
   console.log(`[homepage] trace=${id} ip=${ip} ua="${ua.slice(0, 80)}"`);
 
-  // Build recent list with derived stats.
-  const traces = await recentTraces(100);
+  // Optional UA filter (case-insensitive substring) from ?ua=…
+  const uaFilter = reqUrl.searchParams.get("ua")?.trim() ?? "";
+
+  // Build recent list with derived stats (over the full recent set, so the
+  // per-UA summary counts everything; the table itself is filtered below).
+  const allTraces = await recentTraces(200);
   const jsRanByTrace = new Map<string, boolean>();
   const countByTrace = new Map<string, number>();
-  for (const t of traces) {
+  for (const t of allTraces) {
     const hits = await listHits(t.id);
     // count excludes the homepage hit itself
     countByTrace.set(t.id, hits.filter((h) => h.kind !== "homepage").length);
     jsRanByTrace.set(t.id, hits.some((h) => h.kind === "js-ran"));
   }
 
-  return new Response(homepageHtml(id, traces, jsRanByTrace, countByTrace), {
-    headers: noStore({ "content-type": "text/html; charset=utf-8" }),
-  });
+  // Per-UA running counts (grouped by exact UA string).
+  const uaGroups = new Map<string, { count: number; jsRan: number }>();
+  for (const t of allTraces) {
+    const key = t.ua || "(no user-agent)";
+    const g = uaGroups.get(key) ?? { count: 0, jsRan: 0 };
+    g.count++;
+    if (jsRanByTrace.get(t.id)) g.jsRan++;
+    uaGroups.set(key, g);
+  }
+
+  const filtered = uaFilter
+    ? allTraces.filter((t) => (t.ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
+    : allTraces;
+
+  return new Response(
+    homepageHtml({
+      id,
+      origin,
+      traces: filtered.slice(0, 100),
+      jsRanByTrace,
+      countByTrace,
+      uaGroups,
+      uaFilter,
+      totalTraces: allTraces.length,
+    }),
+    { headers: noStore({ "content-type": "text/html; charset=utf-8" }) },
+  );
 }
 
 const KIND_LABEL: Record<AssetKind, string> = {
@@ -676,6 +928,16 @@ const KIND_LABEL: Record<AssetKind, string> = {
   "css-font": "CSS @font-face",
   "js-ran": "JS executed beacon",
   timing: "client timing POST",
+  favicon: "favicon",
+  "apple-icon": "apple-touch-icon",
+  manifest: "web app manifest",
+  "manifest-icon": "manifest icon",
+  preload: "preload (image)",
+  prefetch: "prefetch",
+  module: "ES module",
+  "module-ran": "ES module executed",
+  "og-image": "Open Graph image",
+  "twitter-image": "Twitter card image",
 };
 
 async function handleTrace(id: string): Promise<Response> {
@@ -699,6 +961,7 @@ async function handleTrace(id: string): Promise<Response> {
   const followedCssBg = kinds.has("css-bg");
   const followedCssFont = kinds.has("css-font");
   const jsRan = kinds.has("js-ran");
+  const moduleRan = kinds.has("module-ran");
   const timingHit = hits.find((h) => h.kind === "timing" && h.timing);
 
   function chk(b: boolean, label: string): string {
@@ -708,33 +971,59 @@ async function handleTrace(id: string): Promise<Response> {
   const summary = `
 <section class="explainer">
 <h3 style="margin-top:0">What this user agent did</h3>
+<p style="font-size:0.95em;margin-bottom:0.6em">Directly-referenced assets:</p>
 <div class="kinds" style="margin-bottom:0.6em">
   ${chk(kinds.has("css"), "fetched CSS")}
   ${chk(kinds.has("js"), "fetched JS")}
   ${chk(kinds.has("img"), "fetched image")}
   ${chk(kinds.has("font"), "fetched font (HTML)")}
 </div>
+<p style="font-size:0.95em;margin-bottom:0.6em">Document-level link hints:</p>
+<div class="kinds" style="margin-bottom:0.6em">
+  ${chk(kinds.has("favicon"), "fetched favicon")}
+  ${chk(kinds.has("apple-icon"), "fetched apple-touch-icon")}
+  ${chk(kinds.has("manifest"), "fetched web manifest")}
+  ${chk(kinds.has("preload"), "fetched preload")}
+  ${chk(kinds.has("prefetch"), "fetched prefetch")}
+</div>
+<p style="font-size:0.95em;margin-bottom:0.6em">Second-level follows (proves it parsed the linking file):</p>
 <div class="kinds" style="margin-bottom:0.6em">
   ${chk(followedCssBg, "followed CSS background-image")}
   ${chk(followedCssFont, "followed CSS @font-face")}
+  ${chk(kinds.has("manifest-icon"), "followed manifest icon")}
 </div>
+<p style="font-size:0.95em;margin-bottom:0.6em">Social embed (Open Graph / Twitter card images):</p>
+<div class="kinds" style="margin-bottom:0.6em">
+  ${chk(kinds.has("og-image"), "fetched og:image")}
+  ${chk(kinds.has("twitter-image"), "fetched twitter:image")}
+</div>
+<p style="font-size:0.95em;margin-bottom:0.6em">JavaScript execution:</p>
 <div class="kinds">
-  ${chk(jsRan, "EXECUTED JavaScript")}
+  ${chk(jsRan, "EXECUTED classic JS")}
+  ${chk(moduleRan, "EXECUTED ES module")}
   ${chk(!!timingHit, "posted client timing")}
 </div>
 </section>`;
 
-  const rows = hits.map((h) => {
+  const rows = hits.map((h, i) => {
     const delta = h.ts - t0;
+    // The request row, then a full-width row beneath it holding the headers
+    // expando so it spans the whole table instead of being squashed into the
+    // last (narrow) column.
     return `<tr>
   <td class="mono">${fmtTs(h.ts)}</td>
   <td class="delta mono">+${delta} ms</td>
   <td><span class="badge kind">${KIND_LABEL[h.kind]}</span></td>
   <td class="mono">${escapeHtml(h.method)}</td>
   <td><span class="ua" title="${escapeHtml(h.ua)}">${escapeHtml(h.ua || "—")}</span></td>
-  <td><details><summary>headers</summary><pre class="headers">${
-      escapeHtml(JSON.stringify(h.headers, null, 2))
-    }</pre></details></td>
+</tr>
+<tr class="headers-row">
+  <td colspan="5">
+    <details>
+      <summary>request headers (${Object.keys(h.headers).length})</summary>
+      <pre class="headers">${escapeHtml(JSON.stringify(h.headers, null, 2))}</pre>
+    </details>
+  </td>
 </tr>`;
   }).join("\n");
 
@@ -782,7 +1071,7 @@ ${summary}
 <p>Every request the server received for this trace, in receive order. <code>+ms</code> is the delta from the
 homepage request.</p>
 <table>
-<thead><tr><th>Received</th><th>Δ</th><th>Kind</th><th>Method</th><th>User-Agent</th><th></th></tr></thead>
+<thead><tr><th>Received</th><th>Δ</th><th>Kind</th><th>Method</th><th>User-Agent</th></tr></thead>
 <tbody>${rows}</tbody>
 </table>
 ${waterfall}
@@ -814,8 +1103,9 @@ async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Resp
   }
 
   if (path === "/favicon.ico") {
-    return new Response(GIF_1x1, {
-      headers: { "content-type": "image/gif", "cache-control": "max-age=86400" },
+    // Untraced root favicon (the per-trace probe lives at /r/{id}/favicon.ico).
+    return new Response(ICO_FAVICON, {
+      headers: { "content-type": "image/x-icon", "cache-control": "max-age=86400" },
     });
   }
 

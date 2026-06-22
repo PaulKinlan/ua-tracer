@@ -456,6 +456,8 @@ const INLINE_STYLE = `
   --bg-secondary: #f0eee6;
   --border: #e3e0d6;
   --muted: #555;
+  --accent-bg: #e7eefb;
+  --accent-border: #b9cdf2;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -464,6 +466,8 @@ const INLINE_STYLE = `
     --bg-secondary: #2a2723;
     --border: #3a362f;
     --muted: #aaa;
+    --accent-bg: #1f2c44;
+    --accent-border: #2f4570;
   }
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -505,6 +509,24 @@ main { max-width: 860px; width: 100%; margin: auto; padding: 1.5em 1em 4em; }
 }
 .current-trace-link a:hover { background: var(--border); }
 .current-trace-link code { background: transparent; padding: 0; }
+.quick-nav { margin: 0 0 2em; }
+.quick-nav .qn-group { margin-bottom: 0.7em; }
+.quick-nav .qn-group:last-child { margin-bottom: 0; }
+.quick-nav .qn-label {
+  display: block; font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); margin-bottom: 0.4em; font-weight: 600;
+}
+.quick-nav .qn-pills { display: flex; flex-wrap: wrap; gap: 0.45em; }
+.quick-nav a.qn-pill {
+  display: inline-flex; align-items: center; gap: 0.4em; padding: 0.4em 0.85em;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--bg-secondary);
+  color: var(--color); text-decoration: none; font-size: 0.86em; line-height: 1.2;
+  white-space: nowrap;
+}
+.quick-nav a.qn-pill:hover { background: var(--border); }
+.quick-nav a.qn-pill.qn-primary { background: var(--accent-bg); border-color: var(--accent-border); }
+.quick-nav a.qn-pill svg { width: 14px; height: 14px; flex: 0 0 auto; opacity: 0.75; }
+.quick-nav a.qn-pill code { background: transparent; padding: 0; font-size: 0.92em; }
 h1, h2, h3 { font-family: Georgia, "Times New Roman", Times, serif; font-weight: normal; }
 h2 { font-size: 1.8em; margin: 1.4em 0 0.5em; }
 h3 { font-size: 1.3em; margin: 1.2em 0 0.4em; }
@@ -591,6 +613,91 @@ tr.pills-row:hover td { background: transparent; }
   .filter-bar input[type="search"] { min-width: 0; }
 }
 `;
+
+// Small inline SVG icon set (no emoji per house style). 14x14, currentColor.
+const ICON: Record<string, string> = {
+  trace:
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15"/></svg>',
+  list:
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M5 4h9M5 8h9M5 12h9M2 4h.01M2 8h.01M2 12h.01"/></svg>',
+  filter:
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 3h12l-4.5 5.5V13L6.5 14V8.5L2 3z"/></svg>',
+  bot:
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="5" width="10" height="8" rx="2"/><path d="M8 5V2.5M5.5 9h.01M10.5 9h.01"/></svg>',
+  globe:
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12"/></svg>',
+  doc:
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3M6 8h4M6 11h4"/></svg>',
+  health:
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 8h3l1.5-4 3 8L12 8h3"/></svg>',
+  github:
+    '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0a8 8 0 00-2.5 15.6c.4.07.55-.17.55-.38v-1.3c-2.2.48-2.67-1.07-2.67-1.07-.36-.92-.88-1.16-.88-1.16-.72-.5.05-.48.05-.48.8.05 1.22.82 1.22.82.71 1.2 1.87.86 2.33.66.07-.52.28-.86.5-1.06-1.76-.2-3.6-.88-3.6-3.9 0-.86.3-1.57.82-2.12-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.81a7.6 7.6 0 014 0c1.53-1.02 2.2-.8 2.2-.8.44 1.1.16 1.9.08 2.1.5.56.82 1.27.82 2.13 0 3.03-1.85 3.7-3.6 3.9.28.24.54.72.54 1.46v2.16c0 .21.15.46.55.38A8 8 0 008 0z"/></svg>',
+};
+
+// A categorised quick-links nav shown under the header on the homepage and
+// /traces. `currentId` (optional) adds a link straight to the request's trace.
+function quickLinks(opts: { currentId?: string; origin?: string }): string {
+  const { currentId } = opts;
+  const pill = (href: string, icon: string, label: string, primary = false) =>
+    `<a class="qn-pill${primary ? " qn-primary" : ""}" href="${href}">${
+      ICON[icon] ?? ""
+    }<span>${label}</span></a>`;
+
+  const traceGroup = `
+  <div class="qn-group">
+    <span class="qn-label">This request</span>
+    <div class="qn-pills">
+      ${
+    currentId
+      ? pill(`/trace/${encodeURIComponent(currentId)}`, "trace", "View this trace", true)
+      : pill("/", "trace", "New trace (load /)", true)
+  }
+      ${pill("/", "trace", "Re-roll a new trace")}
+    </div>
+  </div>`;
+
+  const browseGroup = `
+  <div class="qn-group">
+    <span class="qn-label">Browse &amp; filter</span>
+    <div class="qn-pills">
+      ${pill("/traces", "list", "All recent requests")}
+      ${pill("/traces#by-user-agent", "bot", "By user agent")}
+      ${pill("/traces?ua=bot", "filter", "Filter: bot")}
+      ${pill("/traces?ua=Googlebot", "filter", "Googlebot")}
+      ${pill("/traces?ua=GPTBot", "filter", "GPTBot")}
+      ${pill("/traces?ua=ClaudeBot", "filter", "ClaudeBot")}
+    </div>
+  </div>`;
+
+  const wellKnownGroup = `
+  <div class="qn-group">
+    <span class="qn-label">Well-known &amp; agent files</span>
+    <div class="qn-pills">
+      ${pill("/traces#unsolicited", "globe", "Unsolicited probes")}
+      ${pill("/robots.txt", "doc", "robots.txt")}
+      ${pill("/sitemap.xml", "doc", "sitemap.xml")}
+      ${pill("/llms.txt", "doc", "llms.txt")}
+      ${pill("/.well-known/security.txt", "doc", "security.txt")}
+      ${pill("/ai.txt", "doc", "ai.txt")}
+    </div>
+  </div>`;
+
+  const metaGroup = `
+  <div class="qn-group">
+    <span class="qn-label">Meta</span>
+    <div class="qn-pills">
+      ${pill("/api/health", "health", "Health")}
+      ${pill("https://github.com/PaulKinlan/ua-tracer", "github", "Source")}
+    </div>
+  </div>`;
+
+  return `<nav class="quick-nav" aria-label="Quick links">
+${traceGroup}
+${browseGroup}
+${wellKnownGroup}
+${metaGroup}
+</nav>`;
+}
 
 function pageShell(title: string, body: string): string {
   return `<!DOCTYPE html>
@@ -806,9 +913,7 @@ ${REQ_TABLE_HEAD}
 </form>`;
 
   const body = `
-<p class="current-trace-link"><a href="/trace/${
-    escapeHtml(id)
-  }">→ View the trace for this request (<code>${escapeHtml(id)}</code>)</a></p>
+${quickLinks({ currentId: id, origin })}
 <section class="explainer">
 <p>This page just minted a fresh trace id <code>${escapeHtml(id)}</code>. Every asset it references
 lives under <code>/r/${
@@ -920,6 +1025,62 @@ function jsBody(id: string): string {
     // (a) Prove JS executed: beacon a unique gif.
     new Image().src = ${JSON.stringify(`${base}/js-ran.gif`)} + "?t=" + Date.now();
   } catch (e) {}
+
+  // CSP / Reporting probes. The page is served with a report-only CSP that the
+  // page deliberately violates (an inline style + a disallowed image source).
+  // Browsers DELIVER report-uri/report-to reports lazily (batched, often only
+  // on unload), so headless/crawler runs miss them. To capture the signal
+  // reliably we also listen in-page and beacon immediately:
+  //  - securitypolicyviolation event fires synchronously on each violation.
+  //  - ReportingObserver surfaces queued reports (csp-violation, deprecation…).
+  function beacon(url, payload) {
+    try {
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(url, new Blob([payload], { type: "application/json" }));
+      } else {
+        fetch(url, { method: "POST", body: payload, headers: { "content-type": "application/json" }, keepalive: true });
+      }
+    } catch (e) {}
+  }
+  try {
+    document.addEventListener("securitypolicyviolation", function (e) {
+      beacon(${JSON.stringify(`${base}/csp-report`)}, JSON.stringify({
+        source: "securitypolicyviolation",
+        violatedDirective: e.violatedDirective,
+        effectiveDirective: e.effectiveDirective,
+        blockedURI: e.blockedURI,
+        documentURI: e.documentURI,
+        disposition: e.disposition,
+        lineNumber: e.lineNumber,
+        sourceFile: e.sourceFile,
+        ua: navigator.userAgent
+      }));
+    });
+    // The inline <style>/style="" violations in <head> fire DURING parse,
+    // before this script ran, so the listener above would miss them. Trigger a
+    // fresh inline-style violation now (listener is attached) by inserting an
+    // element with an inline style attribute, which violates style-src 'self'
+    // under the report-only policy and fires securitypolicyviolation.
+    var probe = document.createElement("div");
+    probe.style.cssText = "position:absolute;left:-9999px";
+    probe.setAttribute("style", "position:absolute;left:-9999px;color:rebeccapurple");
+    (document.body || document.documentElement).appendChild(probe);
+  } catch (e) {}
+  try {
+    if (typeof ReportingObserver !== "undefined") {
+      var ro = new ReportingObserver(function (reports) {
+        try {
+          beacon(${JSON.stringify(`${base}/report`)}, JSON.stringify({
+            source: "ReportingObserver",
+            reports: reports.map(function (r) { return { type: r.type, url: r.url, body: r.body }; }),
+            ua: navigator.userAgent
+          }));
+        } catch (e) {}
+      }, { buffered: true });
+      ro.observe();
+    }
+  } catch (e) {}
+
   function send() {
     try {
       var entries = [];
@@ -1242,10 +1403,17 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
   // still renders). A UA that honours CSP/Reporting will POST a violation report
   // to the trace-scoped endpoint, which we log. report-uri is the legacy form;
   // report-to + Reporting-Endpoints + Report-To are the modern Reporting API.
+  // report-only policy: it never blocks, but the page violates it (inline
+  // <style> + inline style="" attributes) so any UA honouring CSP reporting
+  // generates a violation. We deliver reports three ways for maximum coverage:
+  //   1. report-uri  (legacy; still the most widely delivered)
+  //   2. report-to + Reporting-Endpoints/Report-To (modern Reporting API)
+  //   3. in-page securitypolicyviolation listener that beacons immediately
+  //      (header delivery is batched/lazy and routinely missed by crawlers).
   const reportHeaders: Record<string, string> = {
     "content-type": "text/html; charset=utf-8",
     "reporting-endpoints": `ua-tracer="/r/${id}/report"`,
-    "report-to": `{"group":"ua-tracer","max_age":3600,"endpoints":[{"url":"/r/${id}/report"}]}`,
+    "report-to": `{"group":"ua-tracer","max_age":86400,"endpoints":[{"url":"/r/${id}/report"}]}`,
     "content-security-policy-report-only":
       `style-src 'self'; report-uri /r/${id}/csp-report; report-to ua-tracer`,
   };
@@ -1347,12 +1515,13 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, p, re
     : `<p class="empty">No unsolicited probe requests recorded yet.</p>`;
 
   const body = `
+${quickLinks({})}
 <section class="explainer">
 <p>All recent homepage requests, newest first. This page does <strong>not</strong> mint a new
 trace (unlike <a href="/">/</a>), so you can browse the log without adding noise.</p>
 </section>
 
-<h2>Recent homepage requests</h2>
+<h2 id="recent-requests">Recent homepage requests</h2>
 <p>Filter by user agent and the matching requests appear right below.${
     uaFilter
       ? ` Showing requests whose user agent contains <code>${escapeHtml(uaFilter)}</code>.`
@@ -1361,12 +1530,12 @@ trace (unlike <a href="/">/</a>), so you can browse the log without adding noise
 ${filterBar}
 ${table}
 
-<h2>By user agent</h2>
+<h2 id="by-user-agent">By user agent</h2>
 <p>Running counts across the last ${totalTraces} homepage requests (${uaEntries.length} distinct
 agents). Click one to set the filter above.</p>
 ${uaSummary}
 
-<h2>Unsolicited / well-known requests</h2>
+<h2 id="unsolicited">Unsolicited / well-known requests</h2>
 <p>Paths a user agent fetched on its own that ua-tracer never links to: robots.txt, sitemap.xml,
 <code>/.well-known/*</code>, llms.txt, the root favicon, and similar. Reveals what an agent probes
 on its own initiative. (${probes.length} recent.)</p>
@@ -1462,6 +1631,23 @@ async function handleTrace(id: string): Promise<Response> {
   const moduleRan = kinds.has("module-ran");
   const timingHit = hits.find((h) => h.kind === "timing" && h.timing);
 
+  // Distinguish how a CSP/Reporting report was delivered. Header-based delivery
+  // (report-uri / Reporting-Endpoints) needs NO JS but is batched/lazy and
+  // rarely flushed by crawlers. Our in-page listeners (securitypolicyviolation
+  // / ReportingObserver) beacon immediately and are tagged with a `source`.
+  const reportHits = hits.filter((h) => h.kind === "csp-report" || h.kind === "report");
+  const reportBodies = reportHits.map((h) => h.headers["x-report-body"] ?? "");
+  const reportViaJs = reportBodies.some((b) =>
+    b.includes("securitypolicyviolation") || b.includes("ReportingObserver")
+  );
+  const reportViaHeader = reportHits.some((h) => {
+    const b = h.headers["x-report-body"] ?? "";
+    const ct = (h.headers["content-type"] ?? "").toLowerCase();
+    // A header-delivered report is NOT one of our JS beacons.
+    return (ct.includes("csp-report") || ct.includes("reports+json")) &&
+      !b.includes("securitypolicyviolation") && !b.includes("ReportingObserver");
+  });
+
   function chk(b: boolean, label: string): string {
     return `<span class="badge ${b ? "yes" : "no"}">${b ? "✓" : "✗"} ${label}</span>`;
   }
@@ -1496,10 +1682,11 @@ async function handleTrace(id: string): Promise<Response> {
   ${chk(kinds.has("iframe"), "fetched iframe document")}
   ${chk(kinds.has("iframe-img"), "descended into iframe (loaded inner image)")}
 </div>
-<p style="font-size:0.95em;margin-bottom:0.6em">Reporting (CSP report-only is violated by an inline style):</p>
+<p style="font-size:0.95em;margin-bottom:0.6em">Reporting (a report-only CSP is violated by inline styles; reports can arrive via HTTP headers with no JS, or via in-page beacons):</p>
 <div class="kinds" style="margin-bottom:0.6em">
-  ${chk(kinds.has("csp-report"), "sent CSP violation report")}
-  ${chk(kinds.has("report"), "sent Reporting-API report")}
+  ${chk(kinds.has("csp-report") || kinds.has("report"), "sent a CSP/Reporting report (any path)")}
+  ${chk(reportViaHeader, "delivered via report-uri/Report-To header (no JS)")}
+  ${chk(reportViaJs, "delivered via in-page beacon (securitypolicyviolation / ReportingObserver)")}
 </div>
 <p style="font-size:0.95em;margin-bottom:0.6em">Social embed (Open Graph / Twitter card images):</p>
 <div class="kinds" style="margin-bottom:0.6em">

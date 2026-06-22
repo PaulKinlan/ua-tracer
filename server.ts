@@ -604,6 +604,8 @@ tr.req-row td { border-bottom: none; padding-bottom: 0.25em; }
 tr.pills-row td { border-top: none; padding-top: 0; padding-bottom: 0.7em; }
 tr.pills-row:hover td { background: transparent; }
 .see-all { font-size: 0.9em; }
+.active-filter { font-size: 0.92em; background: var(--accent-bg); border: 1px solid var(--accent-border);
+  border-radius: 6px; padding: 0.5em 0.8em; display: inline-block; }
 @media (max-width: 640px) {
   main { padding: 1.2em 0.7em 3em; }
   table { font-size: 0.8em; }
@@ -671,14 +673,16 @@ function quickLinks(opts: { currentId?: string; origin?: string }): string {
 
   const wellKnownGroup = `
   <div class="qn-group">
-    <span class="qn-label">Well-known &amp; agent files</span>
+    <span class="qn-label">Well-known &amp; agent files (visiting one logs a probe you can then reverse-look-up)</span>
     <div class="qn-pills">
-      ${pill("/traces#unsolicited", "globe", "Unsolicited probes")}
+      ${pill("/traces#unsolicited", "globe", "Unsolicited probe log")}
       ${pill("/robots.txt", "doc", "robots.txt")}
       ${pill("/sitemap.xml", "doc", "sitemap.xml")}
       ${pill("/llms.txt", "doc", "llms.txt")}
       ${pill("/.well-known/security.txt", "doc", "security.txt")}
+      ${pill("/.well-known/ai-plugin.json", "doc", "ai-plugin.json")}
       ${pill("/ai.txt", "doc", "ai.txt")}
+      ${pill("/humans.txt", "doc", "humans.txt")}
     </div>
   </div>`;
 
@@ -1446,14 +1450,34 @@ interface TracesOpts {
   traces: TraceStats[]; // full filtered list
   uaEntries: [string, { count: number; jsRan: number }][]; // full sorted
   uaFilter: string;
+  pathFilter: string;
   totalTraces: number;
   uaPage: number;
   reqPage: number;
   probes: ProbeRecord[];
+  pathEntries: readonly (readonly [string, { count: number; uas: number }])[];
 }
 
 function tracesPageHtml(opts: TracesOpts): string {
-  const { traces, uaEntries, uaFilter, totalTraces, uaPage, reqPage, probes } = opts;
+  const {
+    traces,
+    uaEntries,
+    uaFilter,
+    pathFilter,
+    totalTraces,
+    uaPage,
+    reqPage,
+    probes,
+    pathEntries,
+  } = opts;
+  // Preserve the ua filter when linking by path, and vice versa.
+  const probeFilterUrl = (ua: string, path: string) => {
+    const params = new URLSearchParams();
+    if (ua) params.set("ua", ua);
+    if (path) params.set("path", path);
+    const qs = params.toString();
+    return (qs ? `/traces?${qs}` : "/traces") + "#unsolicited";
+  };
 
   // Recent requests, paged.
   const reqSlice = traces.slice(reqPage * REQ_PAGE_SIZE, (reqPage + 1) * REQ_PAGE_SIZE);
@@ -1499,20 +1523,46 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, p, re
   ${uaFilter ? `<a href="/traces" class="clear-filter">clear</a>` : ""}
 </form>`;
 
-  const probeRows = probes.slice(0, 100).map((pr) =>
-    `<tr>
+  const probeRows = probes.slice(0, 200).map((pr) => {
+    const ua = pr.ua || "(no user-agent)";
+    return `<tr>
   <td class="mono">${fmtTs(pr.ts)}</td>
-  <td class="mono">${escapeHtml(pr.path)}</td>
-  <td><span class="ua" title="${escapeHtml(pr.ua)}">${escapeHtml(pr.ua || "—")}</span></td>
+  <td class="mono"><a href="${probeFilterUrl(uaFilter, pr.path)}" title="Filter to this path">${
+      escapeHtml(pr.path)
+    }</a></td>
+  <td><a class="ua" href="${
+      probeFilterUrl(ua, pathFilter)
+    }" title="Reverse lookup: all requests from ${escapeHtml(ua)}">${
+      escapeHtml(pr.ua || "—")
+    }</a></td>
   <td class="mono">${escapeHtml(pr.ip)}</td>
-</tr>`
-  ).join("\n");
+</tr>`;
+  }).join("\n");
   const probesSection = probes.length
     ? `<div class="scrollx"><table>
-<thead><tr><th>Timestamp</th><th>Path</th><th>User Agent</th><th>IP</th></tr></thead>
+<thead><tr><th>Timestamp</th><th>Path</th><th>User Agent (click for reverse lookup)</th><th>IP</th></tr></thead>
 <tbody>${probeRows}</tbody>
 </table></div>`
-    : `<p class="empty">No unsolicited probe requests recorded yet.</p>`;
+    : `<p class="empty">No unsolicited probe requests${
+      uaFilter || pathFilter ? " match the current filter" : " recorded yet"
+    }.</p>`;
+
+  // By path: which well-known/unsolicited paths got hit, and by how many UAs.
+  const pathRows = pathEntries.slice(0, 60).map(([p, g]) =>
+    `<tr>
+  <td class="mono"><a href="${probeFilterUrl(uaFilter, p)}" title="Show requests to ${
+      escapeHtml(p)
+    }">${escapeHtml(p)}</a></td>
+  <td class="mono">${g.count}</td>
+  <td class="mono">${g.uas}</td>
+</tr>`
+  ).join("\n");
+  const pathSummary = pathEntries.length
+    ? `<div class="scrollx"><table>
+<thead><tr><th>Path</th><th>Requests</th><th>Distinct UAs</th></tr></thead>
+<tbody>${pathRows}</tbody>
+</table></div>`
+    : `<p class="empty">No unsolicited paths fetched yet.</p>`;
 
   const body = `
 ${quickLinks({})}
@@ -1538,7 +1588,23 @@ ${uaSummary}
 <h2 id="unsolicited">Unsolicited / well-known requests</h2>
 <p>Paths a user agent fetched on its own that ua-tracer never links to: robots.txt, sitemap.xml,
 <code>/.well-known/*</code>, llms.txt, the root favicon, and similar. Reveals what an agent probes
-on its own initiative. (${probes.length} recent.)</p>
+on its own initiative.</p>
+${
+    uaFilter || pathFilter
+      ? `<p class="active-filter">Filtered${
+        pathFilter ? ` to path <code>${escapeHtml(pathFilter)}</code>` : ""
+      }${uaFilter ? ` to user agent <code>${escapeHtml(uaFilter)}</code>` : ""}.
+  <a href="/traces#unsolicited">clear filters</a></p>`
+      : ""
+  }
+
+<h3>By path</h3>
+<p>Each unsolicited path with its request count and how many distinct user agents hit it.
+Click a path to see the individual requests; click a user agent below to reverse-look-up everything
+that UA did.</p>
+${pathSummary}
+
+<h3>Requests (${probes.length} shown)</h3>
 ${probesSection}
 <p style="margin-top:1.5em"><a href="/">← back to the live tracer (mints a new trace)</a></p>`;
   return pageShell("recent traces · ua-tracer", body);
@@ -1547,6 +1613,7 @@ ${probesSection}
 async function handleTraces(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const uaFilter = url.searchParams.get("ua")?.trim() ?? "";
+  const pathFilter = url.searchParams.get("path")?.trim() ?? "";
   const uaPage = Math.max(0, parseInt(url.searchParams.get("uap") ?? "0", 10) || 0);
   const reqPage = Math.max(0, parseInt(url.searchParams.get("p") ?? "0", 10) || 0);
   const allTraces = await recentTraces(200);
@@ -1562,19 +1629,45 @@ async function handleTraces(req: Request): Promise<Response> {
   const filtered = uaFilter
     ? allTraces.filter((t) => (t.ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
     : allTraces;
-  const probes = await recentProbes(150);
+
+  const allProbes = await recentProbes(400);
+  // Apply the same ua filter (reverse lookup: see a UA's well-known activity)
+  // and an optional path filter (reverse lookup: which UAs hit /robots.txt).
+  const probes = allProbes.filter((pr) => {
+    const uaOk = !uaFilter || (pr.ua || "").toLowerCase().includes(uaFilter.toLowerCase());
+    const pathOk = !pathFilter || pr.path.toLowerCase().includes(pathFilter.toLowerCase());
+    return uaOk && pathOk;
+  });
+  // "By path" summary over the (ua-filtered) probe set so each well-known path
+  // shows how many requests and distinct UAs hit it.
+  const pathGroups = new Map<string, { count: number; uas: Set<string> }>();
+  const uaScopedProbes = allProbes.filter((pr) =>
+    !uaFilter || (pr.ua || "").toLowerCase().includes(uaFilter.toLowerCase())
+  );
+  for (const pr of uaScopedProbes) {
+    const g = pathGroups.get(pr.path) ?? { count: 0, uas: new Set<string>() };
+    g.count++;
+    g.uas.add(pr.ua || "(no user-agent)");
+    pathGroups.set(pr.path, g);
+  }
+  const pathEntries = [...pathGroups.entries()]
+    .map(([p, g]) => [p, { count: g.count, uas: g.uas.size }] as const)
+    .sort((a, b) => b[1].count - a[1].count);
+
   console.log(
-    `[traces] list: ${allTraces.length} traces, ${uaEntries.length} UAs, ${probes.length} probes, filter="${uaFilter}" uap=${uaPage} p=${reqPage}`,
+    `[traces] list: ${allTraces.length} traces, ${uaEntries.length} UAs, ${allProbes.length} probes (${probes.length} shown), uaFilter="${uaFilter}" pathFilter="${pathFilter}" uap=${uaPage} p=${reqPage}`,
   );
   return new Response(
     tracesPageHtml({
       traces: filtered,
       uaEntries,
       uaFilter,
+      pathFilter,
       totalTraces: allTraces.length,
       uaPage,
       reqPage,
       probes,
+      pathEntries,
     }),
     { headers: noStore({ "content-type": "text/html; charset=utf-8" }) },
   );

@@ -63,7 +63,12 @@ type AssetKind =
   | "module"
   | "module-ran"
   | "og-image"
-  | "twitter-image";
+  | "twitter-image"
+  | "iframe"
+  | "iframe-img"
+  | "css-import"
+  | "csp-report"
+  | "report";
 
 interface HitRecord {
   id: string; // trace id
@@ -360,6 +365,42 @@ async function recentTraces(limit = 100): Promise<TraceStats[]> {
   return out;
 }
 
+// Unsolicited "probe" requests: paths a UA fetches WITHOUT us ever linking them
+// (robots.txt, sitemap.xml, /.well-known/*, llms.txt, …). Logged separately from
+// traces (no trace id) — reveals what an agent checks on its own initiative.
+interface ProbeRecord {
+  path: string;
+  ts: number;
+  ua: string;
+  ip: string;
+  method: string;
+}
+function probeIndexKey(ts: number, rid: string): [string, string, string] {
+  const reverseKey = (Number.MAX_SAFE_INTEGER - ts).toString().padStart(20, "0");
+  return ["probe", reverseKey, rid];
+}
+async function logProbe(path: string, req: Request, ip: string): Promise<void> {
+  const ua = req.headers.get("user-agent") ?? "";
+  const ts = Date.now();
+  console.log(`[probe] ${req.method} ${path} ip=${ip} ua="${ua.slice(0, 80)}"`);
+  const kv = await getKv();
+  await kv.set(
+    probeIndexKey(ts, shortId()),
+    { path, ts, ua, ip, method: req.method } as ProbeRecord,
+    { expireIn: 7 * 24 * 60 * 60 * 1000 },
+  );
+}
+async function recentProbes(limit = 200): Promise<ProbeRecord[]> {
+  const kv = await getKv();
+  const out: ProbeRecord[] = [];
+  for await (
+    const entry of kv.list<ProbeRecord>({ prefix: ["probe"] }, { limit })
+  ) {
+    if (entry.value) out.push(entry.value);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // HTML rendering (page chrome inline — replicating aifoc.us look)
 // ---------------------------------------------------------------------------
@@ -544,6 +585,11 @@ const SHORT_KIND: Partial<Record<AssetKind, string>> = {
   prefetch: "prefetch",
   "og-image": "og-img",
   "twitter-image": "twitter-img",
+  iframe: "iframe",
+  "iframe-img": "iframe-img",
+  "css-import": "@import",
+  "csp-report": "CSP report",
+  report: "report-api",
 };
 const KIND_ORDER: AssetKind[] = [
   "css",
@@ -561,6 +607,11 @@ const KIND_ORDER: AssetKind[] = [
   "prefetch",
   "og-image",
   "twitter-image",
+  "iframe",
+  "iframe-img",
+  "css-import",
+  "csp-report",
+  "report",
 ];
 function kindBadges(kinds: AssetKind[]): string {
   const present = KIND_ORDER.filter((k) => kinds.includes(k));
@@ -741,6 +792,8 @@ ${table}
   <h3>Live probe assets</h3>
   <p class="ua-tracer-probe">This line is set in the probe @font-face and shows the CSS background-image swatch on the left. If your user agent fetched <code>css-bg.png</code> and <code>css-font.woff2</code>, it parsed the stylesheet and followed resources linked from inside it.</p>
   <p class="probe-img-row"><img src="${base}/photo.png" width="40" height="40" alt="probe image (PNG referenced from the HTML)" class="probe-img"> <span>A real PNG referenced directly from the HTML.</span></p>
+  <p>An iframe is embedded below; loading it (and the image inside it) shows whether the UA descends into frames.</p>
+  <iframe src="${base}/iframe" width="220" height="60" title="ua-tracer iframe probe" style="border:1px solid var(--border);border-radius:4px"></iframe>
 </section>
 <script src="${base}/main.js"></script>
 <script type="module" src="${base}/module.js"></script>
@@ -771,7 +824,10 @@ function cssBody(id: string): string {
   // css-font.woff2 is fetched. We keep the background-image as a small swatch
   // pinned to the left edge (not tiled across the text) so the body text stays
   // high-contrast in both light and dark mode.
-  return `/* ua-tracer probe stylesheet for trace ${id} */
+  // @import is at the very top (required by CSS). Fetching import.css proves the
+  // UA followed a stylesheet imported from inside another stylesheet.
+  return `@import url("${base}/import.css");
+/* ua-tracer probe stylesheet for trace ${id} */
 @font-face {
   font-family: "uatracerprobe";
   src: url("${base}/css-font.woff2") format("woff2");
@@ -928,6 +984,11 @@ async function handleAsset(
     "module-ran.gif": "module-ran",
     "og-image.png": "og-image",
     "twitter-image.png": "twitter-image",
+    "iframe": "iframe",
+    "iframe-img.png": "iframe-img",
+    "import.css": "css-import",
+    "csp-report": "csp-report",
+    "report": "report",
   };
   const kind = map[asset];
   if (!kind) {
@@ -946,6 +1007,15 @@ async function handleAsset(
     } catch (_e) {
       // ignore malformed payloads
     }
+  }
+
+  // CSP / Reporting-API endpoints: capture the posted report body so it shows
+  // up in the trace (stored in the hit headers under a synthetic key).
+  if ((asset === "csp-report" || asset === "report") && req.method === "POST") {
+    try {
+      const text = await req.text();
+      if (text) headers["x-report-body"] = text.slice(0, 4000);
+    } catch (_e) { /* ignore */ }
   }
 
   await logHit({ id, kind, ts, ua, ip, method: req.method, headers, timing });
@@ -1024,6 +1094,31 @@ async function handleAsset(
       return new Response(JSON.stringify({ ok: true, recorded: timing?.length ?? 0 }), {
         headers: noStore({ "content-type": "application/json" }),
       });
+    case "iframe":
+      // A nested HTML document referencing its OWN image, so fetching
+      // iframe-img.png proves the UA descended into the frame, not just fetched it.
+      return new Response(
+        `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>ua-tracer iframe probe</title></head><body style="font:14px sans-serif;margin:1em"><p>ua-tracer iframe probe for trace <code>${
+          escapeHtml(id)
+        }</code>. Fetching the image below proves your UA descended into the iframe.</p><img src="/r/${
+          escapeHtml(id)
+        }/iframe-img.png" width="16" height="16" alt="image inside the iframe"></body></html>`,
+        { headers: noStore({ "content-type": "text/html; charset=utf-8" }) },
+      );
+    case "iframe-img.png":
+      return new Response(makePng(16, 16, 90, 60, 160), {
+        headers: noStore({ "content-type": "image/png" }),
+      });
+    case "import.css":
+      return new Response(
+        `/* ua-tracer @import target for trace ${id} — fetching this proves the UA followed an @import */\n.ua-tracer-imported{color:rgb(1,2,3)}\n`,
+        { headers: noStore({ "content-type": "text/css; charset=utf-8" }) },
+      );
+    case "csp-report":
+    case "report":
+      // CSP / Reporting-API endpoints. The posted report body was captured above
+      // (x-report-body header) for display in the trace. Just acknowledge.
+      return new Response(null, { status: 204, headers: noStore() });
     default:
       return new Response("Not found", { status: 404 });
   }
@@ -1086,6 +1181,18 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
     ? allTraces.filter((t) => (t.ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
     : allTraces;
 
+  // Reporting probes: the page carries an inline <style>, which VIOLATES the
+  // report-only policy style-src 'self' (report-only never blocks, so the page
+  // still renders). A UA that honours CSP/Reporting will POST a violation report
+  // to the trace-scoped endpoint, which we log. report-uri is the legacy form;
+  // report-to + Reporting-Endpoints + Report-To are the modern Reporting API.
+  const reportHeaders: Record<string, string> = {
+    "content-type": "text/html; charset=utf-8",
+    "reporting-endpoints": `ua-tracer="/r/${id}/report"`,
+    "report-to": `{"group":"ua-tracer","max_age":3600,"endpoints":[{"url":"/r/${id}/report"}]}`,
+    "content-security-policy-report-only":
+      `style-src 'self'; report-uri /r/${id}/csp-report; report-to ua-tracer`,
+  };
   return new Response(
     homepageHtml({
       id,
@@ -1095,7 +1202,7 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
       uaFilter,
       totalTraces: allTraces.length,
     }),
-    { headers: noStore({ "content-type": "text/html; charset=utf-8" }) },
+    { headers: noStore(reportHeaders) },
   );
 }
 
@@ -1118,10 +1225,11 @@ interface TracesOpts {
   totalTraces: number;
   uaPage: number;
   reqPage: number;
+  probes: ProbeRecord[];
 }
 
 function tracesPageHtml(opts: TracesOpts): string {
-  const { traces, uaEntries, uaFilter, totalTraces, uaPage, reqPage } = opts;
+  const { traces, uaEntries, uaFilter, totalTraces, uaPage, reqPage, probes } = opts;
 
   // Recent requests, paged.
   const reqSlice = traces.slice(reqPage * REQ_PAGE_SIZE, (reqPage + 1) * REQ_PAGE_SIZE);
@@ -1166,6 +1274,22 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, p, re
   <button type="submit">Filter</button>
   ${uaFilter ? `<a href="/traces" class="clear-filter">clear</a>` : ""}
 </form>`;
+
+  const probeRows = probes.slice(0, 100).map((pr) =>
+    `<tr>
+  <td class="mono">${fmtTs(pr.ts)}</td>
+  <td class="mono">${escapeHtml(pr.path)}</td>
+  <td><span class="ua" title="${escapeHtml(pr.ua)}">${escapeHtml(pr.ua || "—")}</span></td>
+  <td class="mono">${escapeHtml(pr.ip)}</td>
+</tr>`
+  ).join("\n");
+  const probesSection = probes.length
+    ? `<div class="scrollx"><table>
+<thead><tr><th>Timestamp</th><th>Path</th><th>User Agent</th><th>IP</th></tr></thead>
+<tbody>${probeRows}</tbody>
+</table></div>`
+    : `<p class="empty">No unsolicited probe requests recorded yet.</p>`;
+
   const body = `
 <section class="explainer">
 <p>All recent homepage requests, newest first. This page does <strong>not</strong> mint a new
@@ -1185,6 +1309,12 @@ ${table}
 <p>Running counts across the last ${totalTraces} homepage requests (${uaEntries.length} distinct
 agents). Click one to set the filter above.</p>
 ${uaSummary}
+
+<h2>Unsolicited / well-known requests</h2>
+<p>Paths a user agent fetched on its own that ua-tracer never links to: robots.txt, sitemap.xml,
+<code>/.well-known/*</code>, llms.txt, the root favicon, and similar. Reveals what an agent probes
+on its own initiative. (${probes.length} recent.)</p>
+${probesSection}
 <p style="margin-top:1.5em"><a href="/">← back to the live tracer (mints a new trace)</a></p>`;
   return pageShell("recent traces · ua-tracer", body);
 }
@@ -1207,8 +1337,9 @@ async function handleTraces(req: Request): Promise<Response> {
   const filtered = uaFilter
     ? allTraces.filter((t) => (t.ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
     : allTraces;
+  const probes = await recentProbes(150);
   console.log(
-    `[traces] list: ${allTraces.length} traces, ${uaEntries.length} UAs, filter="${uaFilter}" uap=${uaPage} p=${reqPage}`,
+    `[traces] list: ${allTraces.length} traces, ${uaEntries.length} UAs, ${probes.length} probes, filter="${uaFilter}" uap=${uaPage} p=${reqPage}`,
   );
   return new Response(
     tracesPageHtml({
@@ -1218,6 +1349,7 @@ async function handleTraces(req: Request): Promise<Response> {
       totalTraces: allTraces.length,
       uaPage,
       reqPage,
+      probes,
     }),
     { headers: noStore({ "content-type": "text/html; charset=utf-8" }) },
   );
@@ -1243,6 +1375,11 @@ const KIND_LABEL: Record<AssetKind, string> = {
   "module-ran": "ES module executed",
   "og-image": "Open Graph image",
   "twitter-image": "Twitter card image",
+  iframe: "iframe document",
+  "iframe-img": "image inside iframe",
+  "css-import": "CSS @import (nested stylesheet)",
+  "csp-report": "CSP violation report (POST)",
+  report: "Reporting API report (POST)",
 };
 
 async function handleTrace(id: string): Promise<Response> {
@@ -1296,6 +1433,17 @@ async function handleTrace(id: string): Promise<Response> {
   ${chk(followedCssBg, "followed CSS background-image")}
   ${chk(followedCssFont, "followed CSS @font-face")}
   ${chk(kinds.has("manifest-icon"), "followed manifest icon")}
+  ${chk(kinds.has("css-import"), "followed CSS @import")}
+</div>
+<p style="font-size:0.95em;margin-bottom:0.6em">Frames (does it descend into iframes?):</p>
+<div class="kinds" style="margin-bottom:0.6em">
+  ${chk(kinds.has("iframe"), "fetched iframe document")}
+  ${chk(kinds.has("iframe-img"), "descended into iframe (loaded inner image)")}
+</div>
+<p style="font-size:0.95em;margin-bottom:0.6em">Reporting (CSP report-only is violated by an inline style):</p>
+<div class="kinds" style="margin-bottom:0.6em">
+  ${chk(kinds.has("csp-report"), "sent CSP violation report")}
+  ${chk(kinds.has("report"), "sent Reporting-API report")}
 </div>
 <p style="font-size:0.95em;margin-bottom:0.6em">Social embed (Open Graph / Twitter card images):</p>
 <div class="kinds" style="margin-bottom:0.6em">
@@ -1390,6 +1538,37 @@ ${waterfall}
 // Router
 // ---------------------------------------------------------------------------
 
+// Unsolicited probe paths a UA may fetch without us ever linking them. Returns
+// a sensible response if `path` is recognised, else null.
+function wellKnownResponse(path: string, origin: string): Response | null {
+  const p = path.toLowerCase();
+  const txt = (body: string) =>
+    new Response(body, {
+      headers: noStore({ "content-type": "text/plain; charset=utf-8" }),
+    });
+  if (p === "/robots.txt") {
+    return txt(`User-agent: *\nAllow: /\nSitemap: ${origin}/sitemap.xml\n`);
+  }
+  if (p === "/sitemap.xml" || p === "/sitemap_index.xml") {
+    return new Response(
+      `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${origin}/</loc></url></urlset>\n`,
+      { headers: noStore({ "content-type": "application/xml; charset=utf-8" }) },
+    );
+  }
+  if (p === "/llms.txt" || p === "/llms-full.txt") {
+    return txt(
+      `# ua-tracer\n\nSee what a user agent fetches, follows, and executes.\n\n- ${origin}/\n`,
+    );
+  }
+  if (
+    p.startsWith("/.well-known/") || p === "/ai.txt" || p === "/humans.txt" ||
+    p === "/security.txt" || p === "/apple-app-site-association"
+  ) {
+    return txt("ua-tracer: this path is tracked but not otherwise served.\n");
+  }
+  return null;
+}
+
 async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
@@ -1409,6 +1588,8 @@ async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Resp
 
   if (path === "/favicon.ico") {
     // Untraced root favicon (the per-trace probe lives at /r/{id}/favicon.ico).
+    // Logged as an unsolicited probe: which UAs fetch the site favicon at all.
+    await logProbe(path, req, ip);
     return new Response(ICO_FAVICON, {
       headers: { "content-type": "image/x-icon", "cache-control": "max-age=86400" },
     });
@@ -1435,6 +1616,16 @@ async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Resp
   // Homepage.
   if (path === "/" && req.method === "GET") {
     return await handleHomepage(req, ip);
+  }
+
+  // Unsolicited probe paths (robots, sitemap, /.well-known/*, llms.txt, …): a UA
+  // may fetch these on its own initiative. Log + serve a sensible response.
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? url.host;
+  const proto = req.headers.get("x-forwarded-proto") ?? url.protocol.replace(":", "");
+  const probeResp = wellKnownResponse(path, `${proto}://${host}`);
+  if (probeResp) {
+    await logProbe(path, req, ip);
+    return probeResp;
   }
 
   return new Response("Not found", { status: 404 });

@@ -917,7 +917,6 @@ ${REQ_TABLE_HEAD}
 </form>`;
 
   const body = `
-${quickLinks({ currentId: id, origin })}
 <section class="explainer">
 <p>This page just minted a fresh trace id <code>${escapeHtml(id)}</code>. Every asset it references
 lives under <code>/r/${
@@ -931,6 +930,7 @@ each load is its own trace:</p>
 <p style="margin-bottom:0">…then open the matching row below. A plain <code>curl</code> only records the homepage
 hit (it parses no CSS and runs no JS) — that contrast is the whole point.</p>
 </section>
+${quickLinks({ currentId: id, origin })}
 
 <h2>By user agent</h2>
 <p>Running counts across the last ${totalTraces} homepage requests, grouped by user agent.

@@ -461,6 +461,12 @@ async function recentProbes(limit = 200): Promise<ProbeRecord[]> {
 // trace closest in time. Returns the trace and how far apart they were (ms),
 // or null when no plausible same-agent trace exists.
 const CORRELATE_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+
+// Canonical custom domain. The app is also reachable on its *.deno.net deploy
+// URL, but that host should never be indexed: every page carries a canonical
+// link to this origin, and requests arriving on a *.deno.net host are 301'd here.
+const CANONICAL_HOST = "uatracer.com";
+const CANONICAL_ORIGIN = `https://${CANONICAL_HOST}`;
 function correlateProbe(
   probe: ProbeRecord,
   traces: TraceStats[],
@@ -741,7 +747,7 @@ ${metaGroup}
 </nav>`;
 }
 
-function pageShell(title: string, body: string): string {
+function pageShell(title: string, body: string, canonicalPath = "/"): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -749,6 +755,7 @@ function pageShell(title: string, body: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 <meta name="description" content="ua-tracer — see what a user agent downloads, follows, and executes.">
+<link rel="canonical" href="${CANONICAL_ORIGIN}${canonicalPath}">
 <style>${INLINE_STYLE}</style>
 </head>
 <body>
@@ -1004,7 +1011,7 @@ ${table}
 `;
 
   // Inject probeHead into the shell head via a marker swap.
-  return pageShell("ua-tracer", body).replace(
+  return pageShell("ua-tracer", body, "/").replace(
     "</head>",
     `${probeHead}</head>`,
   );
@@ -1661,7 +1668,7 @@ user agent and IP within 30 minutes (the same crawler that fetched a well-known 
 loaded <code>/</code>). The offset shows how long before/after the probe that trace was minted.</p>
 ${probesSection}
 <p style="margin-top:1.5em"><a href="/">← back to the live tracer (mints a new trace)</a></p>`;
-  return pageShell("recent traces · ua-tracer", body);
+  return pageShell("recent traces · ua-tracer", body, "/traces");
 }
 
 async function handleTraces(req: Request): Promise<Response> {
@@ -1765,6 +1772,7 @@ async function handleTrace(id: string): Promise<Response> {
         `<h2>Trace not found</h2><p>No trace with id <code>${
           escapeHtml(id)
         }</code>.</p><p><a href="/">← back</a></p>`,
+        "/traces",
       ),
       { status: 404, headers: { "content-type": "text/html; charset=utf-8" } },
     );
@@ -1919,7 +1927,7 @@ homepage request.</p>
 </table>
 ${waterfall}
 `;
-  return new Response(pageShell(`trace ${id}`, body), {
+  return new Response(pageShell(`trace ${id}`, body, `/trace/${encodeURIComponent(id)}`), {
     headers: noStore({ "content-type": "text/html; charset=utf-8" }),
   });
 }
@@ -2044,10 +2052,20 @@ async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Resp
     }"`,
   );
 
-  // Health check.
+  // Health check. Exempt from the canonical redirect so uptime monitors can
+  // hit the deploy URL directly without chasing a 301.
   if (path === "/api/health") {
     return new Response(JSON.stringify({ ok: true, ts: Date.now() }), {
       headers: { "content-type": "application/json" },
+    });
+  }
+
+  // Canonical-domain redirect: anything arriving on the *.deno.net deploy host
+  // is 301'd to the custom domain so search engines never index the deploy URL.
+  if (url.hostname.endsWith(".deno.net") || url.hostname.endsWith(".deno.dev")) {
+    return new Response(null, {
+      status: 301,
+      headers: { location: `${CANONICAL_ORIGIN}${path}${url.search}` },
     });
   }
 

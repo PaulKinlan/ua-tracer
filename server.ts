@@ -1157,6 +1157,9 @@ lives under <code>${
   }/…</code>, so each fetch is tied back to <em>this</em> request and
 your User-Agent. Layered probes inside the CSS and JS reveal whether your UA parses CSS, follows
 resources linked from CSS, and actually executes JavaScript.</p>
+<p class="current-trace-link" style="text-align:left"><a href="/trace/${
+    escapeHtml(id)
+  }">See what your user agent just did →</a></p>
 <p><strong>Try it:</strong> point a crawler at this URL, or run a fresh trace with curl —
 each load is its own trace:</p>
 <pre class="headers">curl -A "${escapeHtml(randomBotName())}" ${escapeHtml(origin)}/</pre>

@@ -36,6 +36,7 @@ export interface TraceRecord {
   ip: string;
   method: string;
   headers: Record<string, string>;
+  secret?: string; // per-trace secret gating /r/{id}/{secret}/... probe paths
 }
 
 // Denormalized per-trace stats, updated as hits arrive. Lets the homepage
@@ -111,6 +112,13 @@ function shortId(): string {
   let out = "";
   for (const b of bytes) out += alphabet[b % alphabet.length];
   return out;
+}
+
+// Build the probe-asset base path. New traces carry a per-request secret so
+// only the agent that received the one-time HTML can hit /r/{id}/{secret}/...;
+// old traces (no secret) keep the legacy /r/{id}/... form.
+function assetBase(id: string, secret?: string): string {
+  return secret ? `/r/${id}/${secret}` : `/r/${id}`;
 }
 
 // A whimsical random bot-style name for the curl example, so the docs don't
@@ -1044,6 +1052,7 @@ const REQ_PAGE_SIZE = 50;
 interface HomepageOpts {
   id: string;
   origin: string;
+  secret?: string;
   traces: TraceStats[];
   uaGroups: Map<string, { count: number; jsRan: number }>;
   uaFilter: string;
@@ -1051,8 +1060,8 @@ interface HomepageOpts {
 }
 
 function homepageHtml(opts: HomepageOpts): string {
-  const { id, origin, traces, uaGroups, uaFilter, totalTraces } = opts;
-  const base = `/r/${id}`;
+  const { id, origin, secret, traces, uaGroups, uaFilter, totalTraces } = opts;
+  const base = assetBase(id, secret);
   // Probe assets all reference {id}. Page chrome styling is INLINE only.
   // These <head> links exercise: stylesheet, font preload, favicon,
   // apple-touch-icon, web app manifest, speculative preload/prefetch.
@@ -1136,8 +1145,8 @@ ${REQ_TABLE_HEAD}
   const body = `
 <section class="explainer">
 <p>This page just minted a fresh trace id <code>${escapeHtml(id)}</code>. Every asset it references
-lives under <code>/r/${
-    escapeHtml(id)
+lives under <code>${
+    escapeHtml(base)
   }/…</code>, so each fetch is tied back to <em>this</em> request and
 your User-Agent. Layered probes inside the CSS and JS reveal whether your UA parses CSS, follows
 resources linked from CSS, and actually executes JavaScript.</p>
@@ -1192,8 +1201,8 @@ ${table}
 // Real asset bodies
 // ---------------------------------------------------------------------------
 
-function cssBody(id: string): string {
-  const base = `/r/${id}`;
+function cssBody(id: string, secret?: string): string {
+  const base = assetBase(id, secret);
   // References two further probes: a background image and an @font-face source.
   // The .ua-tracer-probe element in the page renders with this rule, which
   // forces a real engine to fetch both CSS-linked resources:
@@ -1237,8 +1246,8 @@ function cssBody(id: string): string {
 `;
 }
 
-function jsBody(id: string): string {
-  const base = `/r/${id}`;
+function jsBody(id: string, secret?: string): string {
+  const base = assetBase(id, secret);
   // On execution: beacon js-ran.gif and POST resource timing to /timing.
   return `// ua-tracer probe script for trace ${id}
 (function () {
@@ -1336,8 +1345,8 @@ function jsBody(id: string): string {
 `;
 }
 
-function manifestBody(id: string): string {
-  const base = `/r/${id}`;
+function manifestBody(id: string, secret?: string): string {
+  const base = assetBase(id, secret);
   // A real web app manifest that references its own icon. A UA that fetches
   // manifest-icon.png has parsed the manifest and followed a link from inside
   // it (a second-level follow, like the CSS-linked probes).
@@ -1362,8 +1371,8 @@ function manifestBody(id: string): string {
   );
 }
 
-function moduleBody(id: string): string {
-  const base = `/r/${id}`;
+function moduleBody(id: string, secret?: string): string {
+  const base = assetBase(id, secret);
   // An ES module (<script type="module">). Running it beacons module-ran.gif,
   // proving the UA executes module-type scripts (some run classic JS but skip
   // modules, or vice versa).
@@ -1398,10 +1407,30 @@ async function handleAsset(
   id: string,
   asset: string,
   ip: string,
+  providedSecret?: string,
 ): Promise<Response> {
   const ua = req.headers.get("user-agent") ?? "";
   const ts = Date.now();
   const headers = headersToObject(req.headers);
+
+  // Verify the per-trace secret. New traces store a secret on the TraceRecord
+  // and require it in the URL (/r/{id}/{secret}/...); old traces (no secret
+  // field) accept the legacy /r/{id}/... path. A wrong/missing secret on a
+  // new trace returns 404 (same as not-found, so probes can't distinguish).
+  const kv = await getKv();
+  const trace = await kv.get<TraceRecord>(["trace", id]);
+  const storedSecret = trace.value?.secret;
+  if (providedSecret !== undefined) {
+    // New-format URL: /r/{id}/{secret}/{asset}
+    if (storedSecret && providedSecret !== storedSecret) {
+      return new Response("Not found", { status: 404 });
+    }
+  } else {
+    // Legacy URL: /r/{id}/{asset} — only allowed for traces without a secret.
+    if (storedSecret) {
+      return new Response("Not found", { status: 404 });
+    }
+  }
 
   const map: Record<string, AssetKind> = {
     "style.css": "css",
@@ -1460,11 +1489,11 @@ async function handleAsset(
 
   switch (asset) {
     case "style.css":
-      return new Response(cssBody(id), {
+      return new Response(cssBody(id, storedSecret), {
         headers: noStore({ "content-type": "text/css; charset=utf-8" }),
       });
     case "main.js":
-      return new Response(jsBody(id), {
+      return new Response(jsBody(id, storedSecret), {
         headers: noStore({
           "content-type": "text/javascript; charset=utf-8",
         }),
@@ -1520,12 +1549,12 @@ async function handleAsset(
     case "manifest.json":
       // References its own icon (manifest-icon.png) — fetching THAT proves the
       // UA parsed the manifest and followed a resource linked from inside it.
-      return new Response(manifestBody(id), {
+      return new Response(manifestBody(id, storedSecret), {
         headers: noStore({ "content-type": "application/manifest+json" }),
       });
     case "module.js":
       // ES module that imports module-import logic and beacons module-ran.gif.
-      return new Response(moduleBody(id), {
+      return new Response(moduleBody(id, storedSecret), {
         headers: noStore({ "content-type": "text/javascript; charset=utf-8" }),
       });
     case "timing":
@@ -1538,8 +1567,8 @@ async function handleAsset(
       return new Response(
         `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>ua-tracer iframe probe</title></head><body style="font:14px sans-serif;margin:1em"><p>ua-tracer iframe probe for trace <code>${
           escapeHtml(id)
-        }</code>. Fetching the image below proves your UA descended into the iframe.</p><img src="/r/${
-          escapeHtml(id)
+        }</code>. Fetching the image below proves your UA descended into the iframe.</p><img src="${
+          assetBase(id, storedSecret)
         }/iframe-img.png" width="16" height="16" alt="image inside the iframe"></body></html>`,
         { headers: noStore({ "content-type": "text/html; charset=utf-8" }) },
       );
@@ -1581,6 +1610,7 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
   const COOKIE_NAME = "ua-tracer-trace";
   const COOKIE_TTL_SEC = 60 * 60 * 24; // 24h
   let id: string | null = null;
+  let secret: string | undefined;
   const cookieHeader = req.headers.get("cookie") ?? "";
   const cookieMatch = cookieHeader.match(
     new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([a-zA-Z0-9_-]+)`),
@@ -1589,14 +1619,18 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
     const candidate = cookieMatch[1];
     const kv = await getKv();
     const existing = await kv.get<TraceRecord>(["trace", candidate]);
-    if (existing.value) id = candidate;
+    if (existing.value) {
+      id = candidate;
+      secret = existing.value.secret;
+    }
   }
 
   if (id === null) {
     // Mint a fresh trace.
     id = shortId();
+    secret = shortId(); // per-request secret gating /r/{id}/{secret}/...
     const ts = Date.now();
-    const rec: TraceRecord = { id, ts, ua, ip, method: req.method, headers };
+    const rec: TraceRecord = { id, ts, ua, ip, method: req.method, headers, secret };
     const seedStats: TraceStats = {
       id,
       ts,
@@ -1672,12 +1706,13 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
   //   2. report-to + Reporting-Endpoints/Report-To (modern Reporting API)
   //   3. in-page securitypolicyviolation listener that beacons immediately
   //      (header delivery is batched/lazy and routinely missed by crawlers).
+  const ab = assetBase(id, secret);
   const reportHeaders: Record<string, string> = {
     "content-type": "text/html; charset=utf-8",
-    "reporting-endpoints": `ua-tracer="/r/${id}/report"`,
-    "report-to": `{"group":"ua-tracer","max_age":86400,"endpoints":[{"url":"/r/${id}/report"}]}`,
+    "reporting-endpoints": `ua-tracer="${ab}/report"`,
+    "report-to": `{"group":"ua-tracer","max_age":86400,"endpoints":[{"url":"${ab}/report"}]}`,
     "content-security-policy-report-only":
-      `style-src 'self'; report-uri /r/${id}/csp-report; report-to ua-tracer`,
+      `style-src 'self'; report-uri ${ab}/csp-report; report-to ua-tracer`,
     // (Re)issue the trace cookie so refreshing reuses this id. SameSite=Lax
     // keeps it out of cross-site contexts; Secure is added at runtime when
     // the request arrived over HTTPS (see below).
@@ -1689,6 +1724,7 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
     homepageHtml({
       id,
       origin,
+      secret,
       traces: filtered.slice(0, 100),
       uaGroups,
       uaFilter,
@@ -2293,7 +2329,12 @@ async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Resp
     });
   }
 
-  // Asset probes: /r/{id}/{asset}
+  // Asset probes: /r/{id}/{secret}/{asset} (new) or /r/{id}/{asset} (legacy)
+  const assetMatchSecret = path.match(/^\/r\/([^/]+)\/([^/]+)\/(.+)$/);
+  if (assetMatchSecret) {
+    const [, id, secret, asset] = assetMatchSecret;
+    return await handleAsset(req, id, asset, ip, secret);
+  }
   const assetMatch = path.match(/^\/r\/([^/]+)\/(.+)$/);
   if (assetMatch) {
     const [, id, asset] = assetMatch;

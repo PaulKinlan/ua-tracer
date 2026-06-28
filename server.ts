@@ -12,8 +12,16 @@
 // Lazily open Deno KV so module evaluation never blocks/fails at build time
 // (Deno Deploy provisions KV lazily; top-level await on openKv can break builds).
 let _kv: Deno.Kv | null = null;
-async function getKv(): Promise<Deno.Kv> {
-  if (!_kv) _kv = await Deno.openKv();
+export async function getKv(): Promise<Deno.Kv> {
+  if (!_kv) {
+    // On Deno Deploy the KV is bound to the app, so openKv() with no argument
+    // connects automatically. For local/CLI access (e.g. the backfill script)
+    // the connect URL must be passed EXPLICITLY as the argument — Deno does NOT
+    // honour DENO_KV_URL as an env var and silently falls back to local KV if
+    // the URL is omitted. Read it here and forward it.
+    const url = Deno.env.get("DENO_KV_URL");
+    _kv = url ? await Deno.openKv(url) : await Deno.openKv();
+  }
   return _kv;
 }
 
@@ -21,7 +29,7 @@ async function getKv(): Promise<Deno.Kv> {
 // Types
 // ---------------------------------------------------------------------------
 
-interface TraceRecord {
+export interface TraceRecord {
   id: string;
   ts: number; // ms since epoch (server-receive)
   ua: string;
@@ -34,7 +42,7 @@ interface TraceRecord {
 // render the list + per-UA counts with O(1) reads per trace instead of an
 // expensive list() over every trace's hits (which exhausted the KV pool under
 // crawler load — POOL_DEPLETED 503s).
-interface TraceStats {
+export interface TraceStats {
   id: string;
   ts: number;
   ua: string;
@@ -70,7 +78,7 @@ type AssetKind =
   | "csp-report"
   | "report";
 
-interface HitRecord {
+export interface HitRecord {
   id: string; // trace id
   kind: AssetKind;
   ts: number; // ms since epoch (server-receive)
@@ -187,6 +195,30 @@ function fmtDelta(ms: number): string {
   if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
+}
+
+// Extract a short, human-scannable name from a User-Agent string. Crawlers
+// almost all begin "Mozilla/5.0 (compatible; …)", so the interesting token is
+// buried mid-string; showing the full UA as the primary line makes every row
+// look identical at a glance. This pulls out the distinguishing bit:
+//   - the "compatible; X" token (ClaudeBot/1.0, Googlebot/2.1, ChatGPT-User/1.0)
+//   - else a meaningful Name/Version token (Chrome/120, Edg/120, curl/8.0)
+// The full UA is still rendered beneath it.
+function uaHeadline(ua: string): string {
+  if (!ua) return "(no user-agent)";
+  // Bots: "compatible; Name/Ver" or "compatible; Name"
+  const compat = ua.match(/compatible;\s*([^;,)]+)/i);
+  if (compat) return compat[1].trim();
+  // Name/Version tokens, dropping generic engine noise.
+  const generic = new Set(["Mozilla", "AppleWebKit", "KHTML", "Gecko"]);
+  const tokens = (ua.match(/[A-Za-z][\w.-]*\/[\d.]+/g) ?? [])
+    .filter((t) => !generic.has(t.split("/")[0]));
+  if (tokens.length) {
+    const pref = tokens.find((t) => /(Chrome|Edg|OPR|Firefox|Safari|Version)/.test(t));
+    return pref ?? tokens[tokens.length - 1];
+  }
+  // Fallback: first whitespace-delimited token.
+  return ua.split(/\s+/)[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -342,9 +374,43 @@ const ICO_FAVICON = decodeBase64(
 
 // Recent-index key: newest sorts first (MAX - ts). Shared by the homepage
 // seeder and logHit's incremental updates so they target the same entry.
-function recentIndexKey(ts: number, id: string): [string, string, string] {
+export function recentIndexKey(ts: number, id: string): [string, string, string] {
   const reverseKey = (Number.MAX_SAFE_INTEGER - ts).toString().padStart(20, "0");
   return ["recent", reverseKey, id];
+}
+
+// Normalised UA used as a key segment. Lowercased so ?ua= searches are
+// case-insensitive against the index. Empty UA collapses to a sentinel so it
+// still groups into a stable bucket.
+export function normUa(ua: string): string {
+  const t = (ua || "").trim().toLowerCase();
+  return t || "(no user-agent)";
+}
+
+// Per-trace UA index: [ua, uaLower, reverseTs, id] -> TraceStats. Lets a
+// ?ua= filter list EVERY trace for a user agent across the whole corpus
+// (newest first) instead of only the recent 200. Value is kept in sync with
+// the recent-index snapshot by logHit's CAS loop.
+export function uaIndexKey(
+  ua: string,
+  ts: number,
+  id: string,
+): [string, string, string, string] {
+  const reverseKey = (Number.MAX_SAFE_INTEGER - ts).toString().padStart(20, "0");
+  return ["ua", normUa(ua), reverseKey, id];
+}
+
+// Per-UA running aggregate: [ua-agg, uaLower] -> { ua, count, jsRan }.
+// count = number of homepage traces by this UA; jsRan = how many ran JS.
+// Powers the full-corpus "By user agent" leaderboard (previously only the
+// recent 200 were counted, so the counts were wrong).
+export function uaAggKey(ua: string): [string, string] {
+  return ["ua-agg", normUa(ua)];
+}
+export interface UaAggregate {
+  ua: string; // original-cased UA for display
+  count: number;
+  jsRan: number;
 }
 
 async function logHit(rec: HitRecord): Promise<void> {
@@ -364,20 +430,38 @@ async function logHit(rec: HitRecord): Promise<void> {
     const trace = await kv.get<TraceRecord>(["trace", rec.id]);
     if (trace.value) {
       const recentKey = recentIndexKey(trace.value.ts, rec.id);
+      const uKey = uaIndexKey(trace.value.ua, trace.value.ts, rec.id);
+      const aKey = uaAggKey(trace.value.ua);
       // Concurrent sub-requests (css-bg, js-ran, font, …) all update the same
       // stats entry, so use an atomic compare-and-set on the versionstamp with
       // a small retry loop. A plain get→set races and loses updates (e.g. the
-      // jsRan flag getting clobbered).
+      // jsRan flag getting clobbered). The same atomic also mirrors the
+      // snapshot to the per-UA index and bumps the per-UA aggregate, so all
+      // three views stay consistent.
       for (let attempt = 0; attempt < 8; attempt++) {
         const cur = await kv.get<TraceStats>(recentKey);
         if (!cur.value) break; // entry not seeded (shouldn't happen)
         const s = cur.value;
+        const wasJsRan = s.jsRan;
         s.assetCount += 1;
         if (rec.kind === "js-ran") s.jsRan = true;
         if (!s.kinds.includes(rec.kind)) s.kinds.push(rec.kind);
+        // Bump the UA aggregate only for the fields that change here: the
+        // jsRan counter flips exactly once per trace (false -> true).
+        const aggCur = await kv.get<UaAggregate>(aKey);
+        const agg = aggCur.value ??
+          { ua: trace.value.ua || "(no user-agent)", count: 0, jsRan: 0 };
+        const aggNext: UaAggregate = {
+          ua: agg.ua,
+          count: agg.count,
+          jsRan: agg.jsRan + (!wasJsRan && rec.kind === "js-ran" ? 1 : 0),
+        };
         const res = await kv.atomic()
           .check({ key: recentKey, versionstamp: cur.versionstamp })
+          .check({ key: aKey, versionstamp: aggCur.versionstamp })
           .set(recentKey, s)
+          .set(uKey, s)
+          .set(aKey, aggNext)
           .commit();
         if (res.ok) break;
         // Lost the race: brief backoff, then retry with fresh value.
@@ -417,6 +501,72 @@ async function recentTraces(limit = 100): Promise<TraceStats[]> {
     if (entry.value && typeof entry.value === "object") out.push(entry.value);
   }
   return out;
+}
+
+// Search the ENTIRE corpus by user-agent substring (case-insensitive),
+// newest-first. Uses the per-UA index so:
+//   - an exact-UA match (the common path: leaderboard clicks pass the full UA)
+//     is a bounded prefix scan over just that UA's traces; and
+//   - a genuine substring search streams the whole ["ua"] index once, filtering
+//     in memory, so nothing older than the recent window is hidden.
+// `collectLimit` caps how many matches we materialise (the corpus could be
+// huge); callers slice for display. Returns { traces, truncated }.
+async function searchTracesByUa(
+  uaFilter: string,
+  collectLimit = 2000,
+): Promise<{ traces: TraceStats[]; truncated: boolean }> {
+  const kv = await getKv();
+  const needle = (uaFilter || "").trim().toLowerCase();
+  const out: TraceStats[] = [];
+  let truncated = false;
+  // Exact-UA fast path: if an aggregate exists for this exact (normalised) UA,
+  // scan only that UA's bucket. Covers the "By user agent" click-through, which
+  // is the vast majority of filtered views.
+  const exactPrefix: [string, string] = ["ua", normUa(uaFilter)];
+  // Heuristic: treat as exact only when the needle matches a known UA bucket.
+  // We detect that by checking the aggregate — cheap single point read.
+  const agg = await kv.get<UaAggregate>(uaAggKey(uaFilter));
+  const startPrefix = agg.value ? exactPrefix : ["ua"] as [string];
+  const iter = kv.list<TraceStats>({ prefix: startPrefix });
+  for await (const entry of iter) {
+    if (!entry.value || typeof entry.value !== "object") continue;
+    if (needle && !(entry.value.ua || "").toLowerCase().includes(needle)) {
+      continue;
+    }
+    if (out.length >= collectLimit) {
+      truncated = true;
+      break;
+    }
+    out.push(entry.value);
+  }
+  // The ["ua"] index is already newest-first within each UA bucket, but a
+  // cross-UA scan mixes buckets, so re-sort globally by time descending.
+  out.sort((a, b) => b.ts - a.ts);
+  return { traces: out, truncated };
+}
+
+// Full-corpus per-UA leaderboard from the aggregate index. Optionally filtered
+// by substring (over the UA string). This is what makes "By user agent" counts
+// correct — they previously only reflected the recent 200 traces.
+async function uaAggregate(
+  uaFilter = "",
+): Promise<{
+  entries: [string, { count: number; jsRan: number }][];
+  total: number;
+}> {
+  const kv = await getKv();
+  const needle = uaFilter.trim().toLowerCase();
+  const entries: [string, { count: number; jsRan: number }][] = [];
+  let total = 0;
+  for await (const entry of kv.list<UaAggregate>({ prefix: ["ua-agg"] })) {
+    const v = entry.value;
+    if (!v) continue;
+    if (needle && !(v.ua || "").toLowerCase().includes(needle)) continue;
+    entries.push([v.ua, { count: v.count, jsRan: v.jsRan }]);
+    total += v.count;
+  }
+  entries.sort((a, b) => b[1].count - a[1].count);
+  return { entries, total };
 }
 
 // Unsolicited "probe" requests: paths a UA fetches WITHOUT us ever linking them
@@ -583,6 +733,15 @@ th { font-family: -apple-system, sans-serif; text-transform: uppercase; font-siz
 tr:hover td { background: var(--bg-secondary); }
 .ua { font-family: SFMono-Regular, Consolas, Menlo, monospace; font-size: 0.85em;
   max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+/* Multiline UA cell: bold scannable headline on top (ClaudeBot/1.0, Chrome/120),
+   full UA string wrapped beneath in muted small type. Stops every row looking
+   identical (they all start "Mozilla/5.0 (compatible; …"). */
+.ua-cell { min-width: 0; }
+.ua-headline { font-weight: 600; font-size: 0.95em; }
+.ua-headline a { color: inherit; text-decoration: none; }
+.ua-headline a:hover { text-decoration: underline; }
+.ua-full { font-family: SFMono-Regular, Consolas, Menlo, monospace; font-size: 0.75em;
+  color: var(--muted); word-break: break-all; line-height: 1.35; margin-top: 0.1em; }
 .mono { font-family: SFMono-Regular, Consolas, Menlo, monospace; font-size: 0.85em; }
 .badge { display: inline-block; padding: 0.1em 0.55em; border-radius: 999px; font-size: 0.78em;
   font-family: -apple-system, sans-serif; font-weight: 600; border: 1px solid var(--border); }
@@ -838,9 +997,21 @@ function traceRows(traces: TraceStats[]): string {
     const js = t.jsRan
       ? '<span class="badge yes">JS ran</span>'
       : '<span class="badge no">no JS</span>';
+    const full = t.ua || "";
+    const fullSafe = escapeHtml(full);
+    // UA cell: a bold scannable headline (links to the filtered list) on top,
+    // full UA string wrapped beneath in muted small type. The headline is the
+    // distinguishing token (ClaudeBot/1.0, Chrome/120, …) instead of every
+    // row starting "Mozilla/5.0 (compatible; …".
+    const uaCell = full
+      ? `<div class="ua-headline"><a href="/traces?ua=${
+        encodeURIComponent(full)
+      }" class="ua-link" title="${fullSafe}">${escapeHtml(uaHeadline(full))}</a></div>` +
+        `<div class="ua-full" title="${fullSafe}">${fullSafe}</div>`
+      : `<div class="ua-headline"><span class="muted">(no user-agent)</span></div>`;
     return `<tr class="req-row">
   <td class="mono"><a href="/trace/${escapeHtml(t.id)}">${fmtTs(t.ts)}</a></td>
-  <td><span class="ua" title="${escapeHtml(t.ua)}">${escapeHtml(t.ua || "—")}</span></td>
+  <td class="ua-cell">${uaCell}</td>
   <td class="mono">${t.assetCount}</td>
 </tr>
 <tr class="pills-row"><td colspan="3"><div class="kinds-cell">${js}${
@@ -979,7 +1150,7 @@ hit (it parses no CSS and runs no JS) — that contrast is the whole point.</p>
 ${quickLinks({ currentId: id, origin })}
 
 <h2>By user agent</h2>
-<p>Running counts across the last ${totalTraces} homepage requests, grouped by user agent.
+<p>Running counts across all ${totalTraces} homepage requests, grouped by user agent.
 Click one to filter the list below.</p>
 ${uaSummary}
 
@@ -1392,8 +1563,6 @@ async function handleAsset(
 }
 
 async function handleHomepage(req: Request, ip: string): Promise<Response> {
-  const id = shortId();
-  const ts = Date.now();
   const ua = req.headers.get("user-agent") ?? "";
   const headers = headersToObject(req.headers);
   // Derive the public origin for copy-pasteable examples. Honour the proxy's
@@ -1402,51 +1571,94 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
   const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? reqUrl.host;
   const proto = req.headers.get("x-forwarded-proto") ?? reqUrl.protocol.replace(":", "");
   const origin = `${proto}://${host}`;
-  const rec: TraceRecord = { id, ts, ua, ip, method: req.method, headers };
-  const seedStats: TraceStats = {
-    id,
-    ts,
-    ua,
-    ip,
-    assetCount: 0,
-    jsRan: false,
-    kinds: [],
-  };
 
-  // Persist the trace + recent index in one atomic write. The recent index
-  // value is a TraceStats snapshot (not just the id), so the homepage renders
-  // the list AND the per-UA counts WITHOUT any per-trace follow-up reads —
-  // this is what prevents the KV connection pool from being depleted under
-  // crawler load (the previous N+1 list() pattern caused POOL_DEPLETED 503s).
-  const kv = await getKv();
-  await kv.atomic()
-    .set(["trace", id], rec)
-    .set(recentIndexKey(ts, id), seedStats)
-    .commit();
-  // Also log the homepage itself as a hit so the trace waterfall has a root.
-  await logHit({ id, kind: "homepage", ts, ua, ip, method: req.method, headers });
+  // Anti-spam: if the request carries a valid trace cookie, reuse that trace
+  // id instead of minting a new one. This means refreshing the page (or
+  // re-visiting within the cookie window) does NOT create a fresh trace, so a
+  // human browser cannot pollute the log by hammering F5. Crawlers (curl,
+  // ClaudeBot, …) don't send cookies, so they still get a unique trace per
+  // hit — preserving the tool's core signal.
+  const COOKIE_NAME = "ua-tracer-trace";
+  const COOKIE_TTL_SEC = 60 * 60 * 24; // 24h
+  let id: string | null = null;
+  const cookieHeader = req.headers.get("cookie") ?? "";
+  const cookieMatch = cookieHeader.match(
+    new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([a-zA-Z0-9_-]+)`),
+  );
+  if (cookieMatch) {
+    const candidate = cookieMatch[1];
+    const kv = await getKv();
+    const existing = await kv.get<TraceRecord>(["trace", candidate]);
+    if (existing.value) id = candidate;
+  }
 
-  console.log(`[homepage] trace=${id} ip=${ip} ua="${ua.slice(0, 80)}"`);
+  if (id === null) {
+    // Mint a fresh trace.
+    id = shortId();
+    const ts = Date.now();
+    const rec: TraceRecord = { id, ts, ua, ip, method: req.method, headers };
+    const seedStats: TraceStats = {
+      id,
+      ts,
+      ua,
+      ip,
+      assetCount: 0,
+      jsRan: false,
+      kinds: [],
+    };
+
+    // Persist the trace + recent index in one atomic write. The recent index
+    // value is a TraceStats snapshot (not just the id), so the homepage
+    // renders the list AND the per-UA counts WITHOUT any per-trace follow-up
+    // reads — this is what prevents the KV connection pool from being
+    // depleted under crawler load (the previous N+1 list() pattern caused
+    // POOL_DEPLETED 503s). The same snapshot is also written to the per-UA
+    // index so substring/exact-UA searches cover the whole corpus.
+    const kv = await getKv();
+    await kv.atomic()
+      .set(["trace", id], rec)
+      .set(recentIndexKey(ts, id), seedStats)
+      .set(uaIndexKey(ua, ts, id), seedStats)
+      .commit();
+    // Bump the per-UA aggregate (count of homepage traces by this UA). Done
+    // with its own CAS because it is a separate key that many traces share.
+    const aKey = uaAggKey(ua);
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const aggCur = await kv.get<UaAggregate>(aKey);
+      const agg = aggCur.value ??
+        { ua: ua || "(no user-agent)", count: 0, jsRan: 0 };
+      const res = await kv.atomic()
+        .check({ key: aKey, versionstamp: aggCur.versionstamp })
+        .set(aKey, { ua: agg.ua, count: agg.count + 1, jsRan: agg.jsRan })
+        .commit();
+      if (res.ok) break;
+      await new Promise((r) => setTimeout(r, 5 + attempt * 5));
+    }
+    // Also log the homepage itself as a hit so the trace waterfall has a root.
+    await logHit({ id, kind: "homepage", ts, ua, ip, method: req.method, headers });
+
+    console.log(`[homepage] trace=${id} ip=${ip} ua="${ua.slice(0, 80)}"`);
+  } else {
+    // Reusing an existing trace — do NOT log a new homepage hit (the original
+    // hit is already the root of the waterfall).
+    console.log(`[homepage] reuse trace=${id} ip=${ip} ua="${ua.slice(0, 80)}"`);
+  }
 
   // Optional UA filter (case-insensitive substring) from ?ua=…
   const uaFilter = reqUrl.searchParams.get("ua")?.trim() ?? "";
 
-  // Single cheap read: recent stats straight from the index (no N+1).
-  const allTraces = await recentTraces(200);
+  // Recent activity (newest first) for the unfiltered "Recent homepage requests"
+  // list. This stays a bounded recency scan — it is NOT a search, just "what
+  // just happened". When a filter is active we instead search the whole corpus.
+  const recent = await recentTraces(200);
 
-  // Per-UA running counts (grouped by exact UA string).
-  const uaGroups = new Map<string, { count: number; jsRan: number }>();
-  for (const t of allTraces) {
-    const key = t.ua || "(no user-agent)";
-    const g = uaGroups.get(key) ?? { count: 0, jsRan: 0 };
-    g.count++;
-    if (t.jsRan) g.jsRan++;
-    uaGroups.set(key, g);
-  }
+  // Full-corpus per-UA leaderboard (previously derived from only the recent 200,
+  // which under-counted UAs and hid long-tail crawlers entirely).
+  const { entries: uaEntriesAll, total: totalTracesAll } = await uaAggregate();
+  const uaGroups = new Map<string, { count: number; jsRan: number }>(uaEntriesAll);
 
-  const filtered = uaFilter
-    ? allTraces.filter((t) => (t.ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
-    : allTraces;
+  // Search the entire corpus when a filter is present; otherwise show recent.
+  const filtered: TraceStats[] = uaFilter ? (await searchTracesByUa(uaFilter)).traces : recent;
 
   // Reporting probes: the page carries an inline <style>, which VIOLATES the
   // report-only policy style-src 'self' (report-only never blocks, so the page
@@ -1466,6 +1678,12 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
     "report-to": `{"group":"ua-tracer","max_age":86400,"endpoints":[{"url":"/r/${id}/report"}]}`,
     "content-security-policy-report-only":
       `style-src 'self'; report-uri /r/${id}/csp-report; report-to ua-tracer`,
+    // (Re)issue the trace cookie so refreshing reuses this id. SameSite=Lax
+    // keeps it out of cross-site contexts; Secure is added at runtime when
+    // the request arrived over HTTPS (see below).
+    "set-cookie": `${COOKIE_NAME}=${id}; Path=/; Max-Age=${COOKIE_TTL_SEC}; SameSite=Lax${
+      proto === "https" ? "; Secure" : ""
+    }`,
   };
   return new Response(
     homepageHtml({
@@ -1474,7 +1692,7 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
       traces: filtered.slice(0, 100),
       uaGroups,
       uaFilter,
-      totalTraces: allTraces.length,
+      totalTraces: totalTracesAll,
     }),
     { headers: noStore(reportHeaders) },
   );
@@ -1639,7 +1857,7 @@ ${filterBar}
 ${table}
 
 <h2 id="by-user-agent">By user agent</h2>
-<p>Running counts across the last ${totalTraces} homepage requests (${uaEntries.length} distinct
+<p>Running counts across all ${totalTraces} homepage requests (${uaEntries.length} distinct
 agents). Click one to set the filter above.</p>
 ${uaSummary}
 
@@ -1677,19 +1895,16 @@ async function handleTraces(req: Request): Promise<Response> {
   const pathFilter = url.searchParams.get("path")?.trim() ?? "";
   const uaPage = Math.max(0, parseInt(url.searchParams.get("uap") ?? "0", 10) || 0);
   const reqPage = Math.max(0, parseInt(url.searchParams.get("p") ?? "0", 10) || 0);
+  // Recent traces feed ONLY the probe→trace correlation (a time-window
+  // lookup against recent probes), so a bounded recency scan is correct here.
   const allTraces = await recentTraces(200);
-  const uaGroups = new Map<string, { count: number; jsRan: number }>();
-  for (const t of allTraces) {
-    const key = t.ua || "(no user-agent)";
-    const g = uaGroups.get(key) ?? { count: 0, jsRan: 0 };
-    g.count++;
-    if (t.jsRan) g.jsRan++;
-    uaGroups.set(key, g);
-  }
-  const uaEntries = [...uaGroups.entries()].sort((a, b) => b[1].count - a[1].count);
-  const filtered = uaFilter
-    ? allTraces.filter((t) => (t.ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
-    : allTraces;
+  // Full-corpus search + leaderboard for the actual list and per-UA counts.
+  const { entries: uaEntriesAll, total: totalTracesAll } = await uaAggregate();
+  const uaEntries = uaFilter
+    ? uaEntriesAll.filter(([ua]) => (ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
+    : uaEntriesAll;
+  const uaGroups = new Map<string, { count: number; jsRan: number }>(uaEntriesAll);
+  const filtered = uaFilter ? (await searchTracesByUa(uaFilter)).traces : allTraces;
 
   const allProbes = await recentProbes(400);
   // Apply the same ua filter (reverse lookup: see a UA's well-known activity)
@@ -1725,7 +1940,7 @@ async function handleTraces(req: Request): Promise<Response> {
       uaEntries,
       uaFilter,
       pathFilter,
-      totalTraces: allTraces.length,
+      totalTraces: totalTracesAll,
       uaPage,
       reqPage,
       probes,
@@ -2125,5 +2340,9 @@ async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Resp
   return new Response("Not found", { status: 404 });
 }
 
-console.log("ua-tracer starting…");
-Deno.serve(handler);
+// Only start the server when this file is the entrypoint — importing it (e.g.
+// from the backfill script) must NOT call Deno.serve().
+if (import.meta.main) {
+  console.log("ua-tracer starting…");
+  Deno.serve(handler);
+}

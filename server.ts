@@ -789,6 +789,13 @@ code { font-family: SFMono-Regular, Consolas, Menlo, monospace; background: var(
   background: var(--bg-secondary); color: var(--color); cursor: pointer; font-size: 0.95em; }
 .filter-bar button:hover { background: var(--border); }
 .filter-bar .clear-filter { font-size: 0.9em; color: var(--muted); }
+.filter-toggle {
+  display: inline-flex; align-items: center; gap: 0.35em; font-size: 0.92em;
+  padding: 0.45em 0.7em; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-secondary); cursor: pointer; user-select: none;
+}
+.filter-toggle:hover { background: var(--border); }
+.filter-toggle input[type="checkbox"] { margin: 0; cursor: pointer; }
 details summary { cursor: pointer; color: var(--muted); font-size: 0.85em; }
 /* The headers expando renders as a full-width row beneath its request row. */
 tr.headers-row td { border-top: none; padding-top: 0; padding-bottom: 0.4em; }
@@ -1737,9 +1744,10 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
 // /traces — a read-only list of recent homepage requests. Unlike "/", it does
 // NOT mint a new trace or reference any probe assets, so you can browse the log
 // without adding noise. Quick-access bookmark for "show me everything recent".
-function tracesUrl(uaFilter: string, uap: number, p: number): string {
+function tracesUrl(uaFilter: string, jsOnly: boolean, uap: number, p: number): string {
   const params = new URLSearchParams();
   if (uaFilter) params.set("ua", uaFilter);
+  if (jsOnly) params.set("js", "1");
   if (uap) params.set("uap", String(uap));
   if (p) params.set("p", String(p));
   const qs = params.toString();
@@ -1752,6 +1760,7 @@ interface TracesOpts {
   uaEntries: [string, { count: number; jsRan: number }][]; // full sorted
   uaFilter: string;
   pathFilter: string;
+  jsOnly: boolean;
   totalTraces: number;
   uaPage: number;
   reqPage: number;
@@ -1766,6 +1775,7 @@ function tracesPageHtml(opts: TracesOpts): string {
     uaEntries,
     uaFilter,
     pathFilter,
+    jsOnly,
     totalTraces,
     uaPage,
     reqPage,
@@ -1789,7 +1799,7 @@ function tracesPageHtml(opts: TracesOpts): string {
 ${REQ_TABLE_HEAD}
 <tbody>${rows}</tbody>
 </table></div>
-${pager(reqPage, traces.length, REQ_PAGE_SIZE, (p) => tracesUrl(uaFilter, uaPage, p))}`
+${pager(reqPage, traces.length, REQ_PAGE_SIZE, (p) => tracesUrl(uaFilter, jsOnly, uaPage, p))}`
     : `<p class="empty">${
       uaFilter
         ? `No homepage requests match <code>${escapeHtml(uaFilter)}</code>.`
@@ -1813,7 +1823,7 @@ ${pager(reqPage, traces.length, REQ_PAGE_SIZE, (p) => tracesUrl(uaFilter, uaPage
 <thead><tr><th>User Agent</th><th>Requests</th><th>JS ran</th></tr></thead>
 <tbody>${uaRows}</tbody>
 </table></div>
-${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, p, reqPage))}`
+${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, jsOnly, p, reqPage))}`
     : `<p class="empty">No user agents seen yet.</p>`;
 
   const filterBar = `
@@ -1821,8 +1831,12 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, p, re
   <input type="search" name="ua" value="${
     escapeHtml(uaFilter)
   }" placeholder="filter by user-agent substring, e.g. ClaudeBot" aria-label="Filter by user agent">
+  <label class="filter-toggle" title="Only show traces whose user agent executed JavaScript">
+    <input type="checkbox" name="js" value="1" ${jsOnly ? "checked" : ""}>
+    JS ran
+  </label>
   <button type="submit">Filter</button>
-  ${uaFilter ? `<a href="/traces" class="clear-filter">clear</a>` : ""}
+  ${uaFilter || jsOnly ? `<a href="/traces" class="clear-filter">clear</a>` : ""}
 </form>`;
 
   const probeRows = probes.slice(0, 200).map((pr) => {
@@ -1888,7 +1902,7 @@ trace (unlike <a href="/">/</a>), so you can browse the log without adding noise
     uaFilter
       ? ` Showing requests whose user agent contains <code>${escapeHtml(uaFilter)}</code>.`
       : ""
-  }</p>
+  }${jsOnly ? " Only showing traces where JavaScript executed." : ""}</p>
 ${filterBar}
 ${table}
 
@@ -1929,6 +1943,7 @@ async function handleTraces(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const uaFilter = url.searchParams.get("ua")?.trim() ?? "";
   const pathFilter = url.searchParams.get("path")?.trim() ?? "";
+  const jsOnly = url.searchParams.get("js") === "1";
   const uaPage = Math.max(0, parseInt(url.searchParams.get("uap") ?? "0", 10) || 0);
   const reqPage = Math.max(0, parseInt(url.searchParams.get("p") ?? "0", 10) || 0);
   // Recent traces feed ONLY the probe→trace correlation (a time-window
@@ -1940,7 +1955,8 @@ async function handleTraces(req: Request): Promise<Response> {
     ? uaEntriesAll.filter(([ua]) => (ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
     : uaEntriesAll;
   const uaGroups = new Map<string, { count: number; jsRan: number }>(uaEntriesAll);
-  const filtered = uaFilter ? (await searchTracesByUa(uaFilter)).traces : allTraces;
+  const filtered = (uaFilter ? (await searchTracesByUa(uaFilter)).traces : allTraces)
+    .filter((t) => !jsOnly || t.jsRan);
 
   const allProbes = await recentProbes(400);
   // Apply the same ua filter (reverse lookup: see a UA's well-known activity)
@@ -1976,6 +1992,7 @@ async function handleTraces(req: Request): Promise<Response> {
       uaEntries,
       uaFilter,
       pathFilter,
+      jsOnly,
       totalTraces: totalTracesAll,
       uaPage,
       reqPage,

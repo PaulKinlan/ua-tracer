@@ -425,6 +425,13 @@ const BOT_RANGE_SOURCES: { name: string; url: string; uaMatches: string[] }[] = 
     url: "https://claude.com/crawling/bots.json",
     uaMatches: ["ClaudeBot", "Claude-User", "Claude-SearchBot"],
   },
+  // Apple publishes Applebot CIDRs and notes Applebot also renders in a
+  // browser. See: http://www.apple.com/go/applebot
+  {
+    name: "Applebot",
+    url: "https://search.developer.apple.com/applebot.json",
+    uaMatches: ["Applebot"],
+  },
 ];
 
 // Bots that publish NO ranges — their UA cannot be IP-verified at all.

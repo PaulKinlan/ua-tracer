@@ -2,7 +2,8 @@
   "tasks": {
     "dev": "deno run --watch --allow-net --allow-env --unstable-kv server.ts",
     "start": "deno run --allow-net --allow-env --unstable-kv server.ts",
-    "backfill": "deno run --allow-all --unstable-kv backfill.ts"
+    "backfill": "deno run --allow-all --unstable-kv backfill.ts",
+    "backfill-verify": "deno run --allow-all --unstable-kv backfill-verified.ts"
   },
   "fmt": {
     "lineWidth": 100

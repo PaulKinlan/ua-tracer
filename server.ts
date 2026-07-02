@@ -37,6 +37,7 @@ export interface TraceRecord {
   method: string;
   headers: Record<string, string>;
   secret?: string; // per-trace secret gating /r/{id}/{secret}/... probe paths
+  verified?: BotVerification | null; // IP-range check vs published bot ranges
 }
 
 // Denormalized per-trace stats, updated as hits arrive. Lets the homepage
@@ -51,6 +52,7 @@ export interface TraceStats {
   assetCount: number; // sub-requests, excludes the homepage hit
   jsRan: boolean; // js-ran.gif was hit
   kinds: AssetKind[]; // distinct kinds seen (for quick badges)
+  verified?: BotVerification | null; // IP-range check vs published bot ranges
 }
 
 type AssetKind =
@@ -375,6 +377,150 @@ const WOFF2_FONT = decodeBase64(
 const ICO_FAVICON = decodeBase64(
   "AAABAAEAEBAAAAAAIABWAAAAFgAAAIlQTkcNChoKAAAADUlIRFIAAAAQAAAAEAgGAAAAH/P/YQAAAB1JREFUeJxjTE77+J+BAsBEieZRA0YNGDVgMBkAAE1HAtnWJSmuAAAAAElFTkSuQmCC",
 );
+
+// ---------------------------------------------------------------------------
+// Bot IP-range verification
+// ---------------------------------------------------------------------------
+//
+// A User-Agent string is trivially spoofable, so "is this really Googlebot?"
+// can only be answered by checking the source IP against the ranges the bot
+// operator publishes. Some operators (Google, OpenAI, Bing) publish CIDR
+// ranges; we fetch and cache them and match the client IP. Others (Anthropic's
+// ClaudeBot, ChatGPT-User) publish NO ranges, so their UA is *unfalsifiable* —
+// we tag it "unverifiable" rather than pretend we know.
+
+export interface BotVerification {
+  bot: string; // claimed bot family ("Googlebot", "ClaudeBot", ...)
+  status: "verified" | "unverified" | "unverifiable";
+  note: string;
+}
+
+// Bots whose operators publish CIDR ranges we can match against.
+const BOT_RANGE_SOURCES: { name: string; url: string; uaMatches: string[] }[] = [
+  {
+    name: "Googlebot",
+    url: "https://developers.google.com/static/crawling/ipranges/common-crawlers.json",
+    uaMatches: ["Googlebot"],
+  },
+  {
+    name: "GPTBot",
+    url: "https://openai.com/gptbot.json",
+    uaMatches: ["GPTBot"],
+  },
+  {
+    name: "OAI-SearchBot",
+    url: "https://openai.com/searchbot.json",
+    uaMatches: ["OAI-SearchBot"],
+  },
+  {
+    name: "Bingbot",
+    url: "https://www.bing.com/toolbox/bingbot.json",
+    uaMatches: ["bingbot"],
+  },
+];
+
+// Bots that publish NO ranges — their UA cannot be IP-verified at all.
+const UNVERIFIABLE_BOTS: { name: string; uaMatches: string[] }[] = [
+  { name: "ClaudeBot", uaMatches: ["ClaudeBot"] },
+  { name: "ChatGPT-User", uaMatches: ["ChatGPT-User"] },
+];
+
+const BOT_RANGES_TTL_MS = 24 * 60 * 60 * 1000; // refresh cached ranges daily
+
+// IPv4 CIDR containment (Deno Deploy client IPs are IPv4 or IPv4-mapped IPv6;
+// IPv6 ranges exist for some bots but are not matched in this first version).
+function ipv4ToInt(ip: string): number | null {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const p of parts) {
+    const o = parseInt(p, 10);
+    if (Number.isNaN(o) || o < 0 || o > 255) return null;
+    n = n * 256 + o;
+  }
+  return n >>> 0;
+}
+function cidrContains4(cidr: string, ipInt: number): boolean {
+  const slash = cidr.indexOf("/");
+  if (slash < 0) return cidr === String(ipInt); // single host, rare
+  const base = ipv4ToInt(cidr.slice(0, slash));
+  const bits = parseInt(cidr.slice(slash + 1), 10);
+  if (base === null || Number.isNaN(bits) || bits < 0 || bits > 32) return false;
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return (base & mask) === (ipInt & mask);
+}
+
+// Fetch + cache a source's prefixes in KV; refresh when older than the TTL.
+let _rangeCache: Map<string, { fetchedAt: number; prefixes: string[] }> | null = null;
+async function getBotRanges(
+  source: { name: string; url: string },
+): Promise<string[]> {
+  const now = Date.now();
+  if (!_rangeCache) _rangeCache = new Map();
+  const cached = _rangeCache.get(source.name);
+  if (cached && now - cached.fetchedAt < BOT_RANGES_TTL_MS) {
+    return cached.prefixes;
+  }
+  // KV-backed cache so isolates share the ranges and survive restarts.
+  const kv = await getKv();
+  const key = ["botranges", source.name] as const;
+  const kvEntry = await kv.get<{ fetchedAt: number; prefixes: string[] }>(key);
+  let prefixes = kvEntry.value?.prefixes;
+  let fetchedAt = kvEntry.value?.fetchedAt ?? 0;
+  if (!prefixes || now - fetchedAt >= BOT_RANGES_TTL_MS) {
+    try {
+      const res = await fetch(source.url);
+      const json = await res.json() as {
+        prefixes: Array<{ ipv4Prefix?: string; ipv6Prefix?: string }>;
+      };
+      prefixes = json.prefixes
+        .map((p) => p.ipv4Prefix ?? p.ipv6Prefix ?? "")
+        .filter((p) => p.length > 0);
+      fetchedAt = now;
+      await kv.set(key, { fetchedAt, prefixes });
+    } catch (_e) {
+      // Network/parse failure: fall back to whatever we have, even if stale.
+      if (!prefixes) prefixes = [];
+    }
+  }
+  _rangeCache.set(source.name, { fetchedAt, prefixes });
+  return prefixes;
+}
+
+// Classify a request by IP + UA. Returns null for non-bot UAs.
+export async function classifyBot(
+  ip: string,
+  ua: string,
+): Promise<BotVerification | null> {
+  const ipNorm = ip.replace(/^::ffff:/, "").trim();
+  const uaLower = (ua || "").toLowerCase();
+
+  for (const source of BOT_RANGE_SOURCES) {
+    if (source.uaMatches.some((m) => uaLower.includes(m.toLowerCase()))) {
+      const ranges = await getBotRanges(source);
+      const ipInt = ipv4ToInt(ipNorm);
+      const inRange = ipInt !== null &&
+        ranges.some((r) => r.includes(".") && cidrContains4(r, ipInt));
+      return {
+        bot: source.name,
+        status: inRange ? "verified" : "unverified",
+        note: inRange
+          ? `IP in ${source.name} published range`
+          : `UA claims ${source.name} but IP not in published range`,
+      };
+    }
+  }
+  for (const u of UNVERIFIABLE_BOTS) {
+    if (u.uaMatches.some((m) => uaLower.includes(m.toLowerCase()))) {
+      return {
+        bot: u.name,
+        status: "unverifiable",
+        note: `${u.name} does not publish IP ranges (UA is unfalsifiable)`,
+      };
+    }
+  }
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Logging of hits
@@ -759,10 +905,19 @@ tr:hover td { background: var(--bg-secondary); }
    read as positive (green), like the "JS ran" badge. Absence of a pill means
    the UA did not fetch that resource. */
 .badge.kind { background: #d8f5d8; color: #14532d; border-color: #9fd9a0; }
+/* Bot IP-range verification: green = IP confirmed in published range,
+   red = UA claims a bot but IP is outside its range (likely spoofed),
+   grey = bot publishes no ranges so the UA is unfalsifiable. */
+.badge.verified { background: #d8f5d8; color: #14532d; border-color: #9fd9a0; }
+.badge.unverified { background: #f5dada; color: #7f1d1d; border-color: #e0a3a3; }
+.badge.unverifiable { background: #f0eee6; color: #555; border-color: #ccc8be; }
 @media (prefers-color-scheme: dark) {
   .badge.yes { background: #16351a; color: #b6e8bb; border-color: #2f6b35; }
   .badge.no { background: #3a1717; color: #f0b4b4; border-color: #6b2f2f; }
   .badge.kind { background: #16351a; color: #b6e8bb; border-color: #2f6b35; }
+  .badge.verified { background: #16351a; color: #b6e8bb; border-color: #2f6b35; }
+  .badge.unverified { background: #3a1717; color: #f0b4b4; border-color: #6b2f2f; }
+  .badge.unverifiable { background: #2a2723; color: #aaa; border-color: #3a362f; }
 }
 .kinds { display: flex; gap: 0.4em; flex-wrap: wrap; }
 .delta { color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -1002,6 +1157,22 @@ function kindBadges(kinds: AssetKind[]): string {
   return present.map((k) => `<span class="badge kind">${SHORT_KIND[k] ?? k}</span>`).join("");
 }
 
+// Badge for the IP-range verification of a claimed bot. null (non-bot UA) is
+// rendered as nothing; the three states map to green/red/grey badges.
+function verifiedBadge(v?: BotVerification | null): string {
+  if (!v) return "";
+  const title = escapeHtml(v.note);
+  if (v.status === "verified") {
+    return `<span class="badge verified" title="${title}">✓ ${escapeHtml(v.bot)}</span>`;
+  }
+  if (v.status === "unverified") {
+    return `<span class="badge unverified" title="${title}">⚠ fake ${escapeHtml(v.bot)}?</span>`;
+  }
+  return `<span class="badge unverifiable" title="${title}">? ${
+    escapeHtml(v.bot)
+  } (no ranges)</span>`;
+}
+
 // Render the recent-requests rows: a main row (timestamp, UA, assets) plus
 // a snug full-width pills row beneath it (JS state + each sub-resource fetched).
 // Keeping the pills out of the main columns keeps every main row the same height.
@@ -1029,7 +1200,7 @@ function traceRows(traces: TraceStats[]): string {
   <td class="ua-cell">${uaCell}</td>
   <td class="mono">${t.assetCount}</td>
 </tr>
-<tr class="pills-row"><td colspan="3"><div class="kinds-cell">${js}${
+<tr class="pills-row"><td colspan="3"><div class="kinds-cell">${js}${verifiedBadge(t.verified)}${
       kindBadges(t.kinds)
     }</div></td></tr>`;
   }).join("\n");
@@ -1640,7 +1811,20 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
     id = shortId();
     secret = shortId(); // per-request secret gating /r/{id}/{secret}/...
     const ts = Date.now();
-    const rec: TraceRecord = { id, ts, ua, ip, method: req.method, headers, secret };
+    // IP-range verification against published bot ranges (Google, OpenAI,
+    // Bing). ClaudeBot/ChatGPT-User publish no ranges and are tagged
+    // "unverifiable" — their UA is unfalsifiable.
+    const verified = await classifyBot(ip, ua);
+    const rec: TraceRecord = {
+      id,
+      ts,
+      ua,
+      ip,
+      method: req.method,
+      headers,
+      secret,
+      verified,
+    };
     const seedStats: TraceStats = {
       id,
       ts,
@@ -1649,6 +1833,7 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
       assetCount: 0,
       jsRan: false,
       kinds: [],
+      verified,
     };
 
     // Persist the trace + recent index in one atomic write. The recent index
@@ -2187,7 +2372,21 @@ browser-grade engine, not just a downloader.</p>
 <p><a href="/">← all traces</a></p>
 <h2>Trace <code>${escapeHtml(id)}</code></h2>
 <p><strong>First seen:</strong> ${fmtTs(t0)}<br>
-<strong>User-Agent:</strong> <span class="mono">${escapeHtml(trace.value.ua || "—")}</span></p>
+<strong>User-Agent:</strong> <span class="mono">${escapeHtml(trace.value.ua || "—")}</span><br>
+<strong>Bot verification:</strong> ${
+    trace.value.verified
+      ? `<span class="badge ${trace.value.verified.status}" title="${
+        escapeHtml(trace.value.verified.note)
+      }">${
+        trace.value.verified.status === "verified"
+          ? "✓ verified " + escapeHtml(trace.value.verified.bot)
+          : trace.value.verified.status === "unverified"
+          ? "⚠ NOT in " + escapeHtml(trace.value.verified.bot) + " range (spoofed?)"
+          : "? " + escapeHtml(trace.value.verified.bot) + " (no published ranges)"
+      }</span> <span class="muted">IP checked against published bot CIDR ranges; ` +
+        escapeHtml(trace.value.verified.note) + `.</span>`
+      : `<span class="muted">Not a known bot (no IP-range check applies).</span>`
+  }</p>
 ${summary}
 <h2>Server-side request waterfall</h2>
 <p>Every request the server received for this trace, in receive order. <code>+ms</code> is the delta from the

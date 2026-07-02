@@ -11,3 +11,7 @@ kv.db*
 .DS_Store
 .vscode/
 .idea/
+
+# agent skill files (not part of the project)
+.agents/
+skills-lock.json

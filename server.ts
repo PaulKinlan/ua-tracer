@@ -417,11 +417,18 @@ const BOT_RANGE_SOURCES: { name: string; url: string; uaMatches: string[] }[] = 
     url: "https://www.bing.com/toolbox/bingbot.json",
     uaMatches: ["bingbot"],
   },
+  // Anthropic publishes one list covering all three of its bots (ClaudeBot,
+  // Claude-User, Claude-SearchBot). See:
+  // https://support.claude.com/en/articles/8896518
+  {
+    name: "ClaudeBot",
+    url: "https://claude.com/crawling/bots.json",
+    uaMatches: ["ClaudeBot", "Claude-User", "Claude-SearchBot"],
+  },
 ];
 
 // Bots that publish NO ranges — their UA cannot be IP-verified at all.
 const UNVERIFIABLE_BOTS: { name: string; uaMatches: string[] }[] = [
-  { name: "ClaudeBot", uaMatches: ["ClaudeBot"] },
   { name: "ChatGPT-User", uaMatches: ["ChatGPT-User"] },
 ];
 

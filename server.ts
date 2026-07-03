@@ -827,6 +827,13 @@ const INLINE_STYLE = `
   }
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
+/* Visually hidden but available to screen readers and crawlers. Used for the
+   per-page <h1> so each page has a unique, descriptive primary heading without
+   duplicating the visible wordmark. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
@@ -1108,7 +1115,8 @@ function pageShell(title: string, body: string, canonicalPath = "/"): string {
     <span class="tag">ua-tracer</span>
     <span class="tag">by Paul Kinlan</span>
   </div>
-  <h1 class="site-branding-title"><a href="/">ua-tracer</a></h1>
+  <h1 class="sr-only">${escapeHtml(title)}</h1>
+  <p class="site-branding-title"><a href="/">ua-tracer</a></p>
   <p class="subtitle">what does a user agent actually fetch, follow & run?</p>
 </header>
 ${body}
@@ -1221,7 +1229,7 @@ function traceRows(traces: TraceStats[]): string {
 }
 
 const REQ_TABLE_HEAD =
-  "<thead><tr><th>Timestamp</th><th>User Agent</th><th>Assets</th></tr></thead>";
+  "<thead><tr><th scope='col'>Timestamp</th><th scope='col'>User Agent</th><th scope='col'>Assets</th></tr></thead>";
 
 // Render a prev/next pager. `href(p)` builds the link for page p (0-based).
 function pager(page: number, total: number, size: number, href: (p: number) => string): string {
@@ -1314,7 +1322,7 @@ ${REQ_TABLE_HEAD}
 
   const uaSummary = uaGroups.size
     ? `<div class="scrollx"><table>
-<thead><tr><th>User Agent</th><th>Requests</th><th>JS ran</th></tr></thead>
+<thead><tr><th scope="col">User Agent</th><th scope="col">Requests</th><th scope="col">JS ran</th></tr></thead>
 <tbody>${uaRows}</tbody>
 </table></div>${
       uaEntries.length > UA_PAGE_SIZE
@@ -1594,6 +1602,27 @@ function noStore(headers: HeadersInit = {}): Headers {
   // Defeat caching so crawlers re-fetch and we always log.
   h.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
   h.set("pragma", "no-cache");
+  // Baseline defensive security headers applied to every response. These do
+  // not interfere with the trace/probe logic (assets are first-party, inline
+  // <style> is permitted by style-src 'unsafe-inline'). An enforced CSP here
+  // is separate from the per-trace Content-Security-Policy-Report-Only probe,
+  // which still fires violation reports for UAs that honour CSP reporting.
+  if (!h.has("content-security-policy")) {
+    h.set(
+      "content-security-policy",
+      "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
+        "font-src 'self'; script-src 'self'; frame-src 'self'; connect-src 'self'; " +
+        "object-src 'none'; base-uri 'self'; form-action 'self'",
+    );
+  }
+  h.set("strict-transport-security", "max-age=63072000; includeSubDomains");
+  h.set("x-content-type-options", "nosniff");
+  h.set("referrer-policy", "strict-origin-when-cross-origin");
+  h.set("x-frame-options", "SAMEORIGIN");
+  h.set(
+    "permissions-policy",
+    "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+  );
   return h;
 }
 
@@ -2022,7 +2051,7 @@ ${pager(reqPage, traces.length, REQ_PAGE_SIZE, (p) => tracesUrl(uaFilter, jsOnly
   }).join("\n");
   const uaSummary = uaEntries.length
     ? `<div class="scrollx"><table>
-<thead><tr><th>User Agent</th><th>Requests</th><th>JS ran</th></tr></thead>
+<thead><tr><th scope="col">User Agent</th><th scope="col">Requests</th><th scope="col">JS ran</th></tr></thead>
 <tbody>${uaRows}</tbody>
 </table></div>
 ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, jsOnly, p, reqPage))}`
@@ -2068,7 +2097,7 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, jsOnl
   }).join("\n");
   const probesSection = probes.length
     ? `<div class="scrollx"><table>
-<thead><tr><th>Timestamp</th><th>Path</th><th>User Agent (click for reverse lookup)</th><th>Related trace</th></tr></thead>
+<thead><tr><th scope="col">Timestamp</th><th scope="col">Path</th><th scope="col">User Agent (click for reverse lookup)</th><th scope="col">Related trace</th></tr></thead>
 <tbody>${probeRows}</tbody>
 </table></div>`
     : `<p class="empty">No unsolicited probe requests${
@@ -2087,7 +2116,7 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, jsOnl
   ).join("\n");
   const pathSummary = pathEntries.length
     ? `<div class="scrollx"><table>
-<thead><tr><th>Path</th><th>Requests</th><th>Distinct UAs</th></tr></thead>
+<thead><tr><th scope="col">Path</th><th scope="col">Requests</th><th scope="col">Distinct UAs</th></tr></thead>
 <tbody>${pathRows}</tbody>
 </table></div>`
     : `<p class="empty">No unsolicited paths fetched yet.</p>`;
@@ -2374,7 +2403,7 @@ async function handleTrace(id: string): Promise<Response> {
 <p>Reported by <code>performance.getEntriesByType('resource')</code> after JS ran in the UA. This proves a real
 browser-grade engine, not just a downloader.</p>
 <table>
-<thead><tr><th>Resource</th><th>Initiator</th><th>Start</th><th>Duration</th><th>Timeline</th></tr></thead>
+<thead><tr><th scope="col">Resource</th><th scope="col">Initiator</th><th scope="col">Start</th><th scope="col">Duration</th><th scope="col">Timeline</th></tr></thead>
 <tbody>${bars}</tbody>
 </table>`;
   } else if (jsRan) {
@@ -2406,7 +2435,7 @@ ${summary}
 <p>Every request the server received for this trace, in receive order. <code>+ms</code> is the delta from the
 homepage request.</p>
 <table>
-<thead><tr><th>Received</th><th>Δ</th><th>Kind</th><th>Method</th><th>User-Agent</th></tr></thead>
+<thead><tr><th scope="col">Received</th><th scope="col">Δ</th><th scope="col">Kind</th><th scope="col">Method</th><th scope="col">User-Agent</th></tr></thead>
 <tbody>${rows}</tbody>
 </table>
 ${waterfall}
@@ -2505,14 +2534,12 @@ async function buildSitemap(origin: string): Promise<string> {
     });
   }
 
-  // The most recent trace-detail pages (cap to keep the sitemap lean).
-  for (const t of recent.slice(0, 50)) {
-    urls.push({
-      loc: `${origin}/trace/${encodeURIComponent(t.id)}`,
-      priority: "0.3",
-      lastmod: new Date(t.ts).toISOString(),
-    });
-  }
+  // NOTE: individual /trace/{id} detail pages are deliberately NOT listed.
+  // They are ephemeral (a new one appears every few seconds), each is thin, and
+  // advertising thousands of ever-changing URLs wastes crawler budget and
+  // churns the sitemap. They remain crawlable via the in-page links on /
+  // and /traces, so a shared trace link still resolves; we just don't bulk-
+  // submit them as the site's canonical surface.
 
   const body = urls.map((u) =>
     `  <url><loc>${escapeHtml(u.loc)}</loc>${
@@ -2526,7 +2553,7 @@ ${body}
 `;
 }
 
-async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
+async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
   const ip = clientIp(req, info);
@@ -2581,12 +2608,12 @@ async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Resp
   }
 
   // Read-only recent-traces list (does NOT mint a new trace).
-  if ((path === "/traces" || path === "/traces/") && req.method === "GET") {
+  if ((path === "/traces" || path === "/traces/") && (req.method === "GET" || req.method === "HEAD")) {
     return await handleTraces(req);
   }
 
   // Homepage.
-  if (path === "/" && req.method === "GET") {
+  if (path === "/" && (req.method === "GET" || req.method === "HEAD")) {
     return await handleHomepage(req, ip);
   }
 
@@ -2612,6 +2639,19 @@ async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Resp
   }
 
   return new Response("Not found", { status: 404 });
+}
+
+// HTTP semantics: a HEAD request should return the same headers as GET (same
+// status, same content-type, same security headers) with an empty body. Many
+// monitoring tools and some crawlers issue HEAD; returning 404 for it was a
+// broken signal. We route the request through the normal handler (so it still
+// gets the full set of response headers) and then drop the body.
+async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
+  const res = await routeHandler(req, info);
+  if (req.method === "HEAD") {
+    return new Response(null, { status: res.status, headers: res.headers });
+  }
+  return res;
 }
 
 // Only start the server when this file is the entrypoint — importing it (e.g.

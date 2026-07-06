@@ -1310,11 +1310,21 @@ ${REQ_TABLE_HEAD}
   // surfaced as a leaderboard. Each row links to the filtered view.
   const uaEntries = [...uaGroups.entries()].sort((a, b) => b[1].count - a[1].count);
   const uaRows = uaEntries.slice(0, UA_PAGE_SIZE).map(([ua, g]) => {
-    const short = ua.length > 70 ? ua.slice(0, 70) + "…" : ua;
+    // Same treatment as "Recent homepage requests": a bold, scannable headline
+    // (the distinguishing token like ClaudeBot/1.0, not "Mozilla/5.0
+    // (compatible; …") on top, with the full UA wrapped beneath. The old
+    // single-line ellipsis buried the important bit mid-string.
+    const isNoUa = !ua || ua === "(no user-agent)";
+    const fullSafe = escapeHtml(ua);
+    const uaCell = isNoUa
+      ? `<div class="ua-headline"><span class="muted">(no user-agent)</span></div>`
+      : `<div class="ua-headline"><a href="/traces?ua=${
+        encodeURIComponent(ua)
+      }" class="ua-link" title="${fullSafe}">${
+        escapeHtml(uaHeadline(ua))
+      }</a></div><div class="ua-full" title="${fullSafe}">${fullSafe}</div>`;
     return `<tr>
-  <td><a href="/traces?ua=${encodeURIComponent(ua)}" class="ua" title="${escapeHtml(ua)}">${
-      escapeHtml(short)
-    }</a></td>
+  <td class="ua-cell">${uaCell}</td>
   <td class="mono">${g.count}</td>
   <td class="mono">${g.jsRan}</td>
 </tr>`;
@@ -2037,14 +2047,22 @@ ${pager(reqPage, traces.length, REQ_PAGE_SIZE, (p) => tracesUrl(uaFilter, jsOnly
         : "No traces recorded yet."
     }</p>`;
 
-  // By user agent, paged.
+  // By user agent, paged. Same scannable headline + full-UA-beneath treatment as
+  // the homepage leaderboard and "Recent homepage requests" (no mid-string
+  // truncation that hid the distinguishing token).
   const uaSlice = uaEntries.slice(uaPage * UA_PAGE_SIZE, (uaPage + 1) * UA_PAGE_SIZE);
   const uaRows = uaSlice.map(([ua, g]) => {
-    const short = ua.length > 70 ? ua.slice(0, 70) + "…" : ua;
+    const isNoUa = !ua || ua === "(no user-agent)";
+    const fullSafe = escapeHtml(ua);
+    const uaCell = isNoUa
+      ? `<div class="ua-headline"><span class="muted">(no user-agent)</span></div>`
+      : `<div class="ua-headline"><a href="/traces?ua=${
+        encodeURIComponent(ua)
+      }" class="ua-link" title="${fullSafe}">${
+        escapeHtml(uaHeadline(ua))
+      }</a></div><div class="ua-full" title="${fullSafe}">${fullSafe}</div>`;
     return `<tr>
-  <td><a href="/traces?ua=${encodeURIComponent(ua)}" class="ua" title="${escapeHtml(ua)}">${
-      escapeHtml(short)
-    }</a></td>
+  <td class="ua-cell">${uaCell}</td>
   <td class="mono">${g.count}</td>
   <td class="mono">${g.jsRan}</td>
 </tr>`;
@@ -2608,7 +2626,9 @@ async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise
   }
 
   // Read-only recent-traces list (does NOT mint a new trace).
-  if ((path === "/traces" || path === "/traces/") && (req.method === "GET" || req.method === "HEAD")) {
+  if (
+    (path === "/traces" || path === "/traces/") && (req.method === "GET" || req.method === "HEAD")
+  ) {
     return await handleTraces(req);
   }
 

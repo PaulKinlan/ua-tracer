@@ -136,10 +136,15 @@ The suites are the reason a green gate means something:
   cannot make.
 - The denormalised stats update is awaited on the probe response path, so under
   pathological CAS contention an asset response can wait up to `CAS_DEADLINE_MS`
-  (2 s). The trade-off is deliberate — a dropped count is a permanent data error,
-  a rare slow probe is not — and the give-up path logs a warning rather than
-  dropping silently. Moving the denormalisation off the response path is the real
-  fix and is filed as its own follow-up rather than smuggled into this change.
+  (2 s). The give-up path logs a warning rather than dropping silently, and the
+  raw hit record is written before the snapshot update, so a give-up leaves the
+  count short rather than losing the probe. That trade is no longer forced by
+  irreparability: `deno task backfill` recomputes every snapshot from the raw
+  hits (preserving the bot verdict the earlier rebuild dropped) and then verifies
+  what it wrote with a reconcile loop paced by `CAS_DEADLINE_MS`, so a snapshot
+  that a lost update left wrong is repairable. Moving the denormalisation off the
+  response path is therefore now a latency decision nobody has taken rather than
+  a repair-safety one; it is not proposed here.
 - No coverage measurement yet: this change moves the project from zero executing
   tests to a gate, which is the precondition for a coverage threshold.
 

@@ -374,3 +374,141 @@ Deno.test("a homepage hit and a hit with no trace row record alone, moving no co
     throw new Error("a hit with no trace row invented a stats entry");
   }
 });
+
+// ---- ua-tracer-swf (P1): an unseeded stats entry must not lose the record ----
+// The old code returned success on the unseeded branch WITHOUT executing the atomic,
+// so the record was never written while the caller was told it had committed: a
+// permanently lost probe, reported as a success.
+
+Deno.test("a hit whose trace has no stats entry still lands its record", async () => {
+  await clearKv();
+  const kv = await testKv();
+  const { id } = await mintOnce();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+
+  // Reproduce the state exactly: the trace row is there, the recent-index entry is not.
+  await kv.delete(recentIndexKey(trace.ts, id));
+  if (await stats(id, trace.ts)) throw new Error("setup: the stats entry was not removed");
+
+  const rec: HitRecord = {
+    id,
+    kind: "css",
+    ts: Date.now(),
+    ua: UA,
+    ip: IP,
+    method: "GET",
+    headers: {},
+  };
+  const hitKey: Deno.KvKey = ["hit", id, "swf0000000000000000000001"];
+  const warnings: string[] = [];
+  const outcome = await commitHit(kv, rec, hitKey, trace, {
+    warn: (line) => warnings.push(line),
+    deadlineMs: 50,
+  });
+
+  if (outcome === "committed") {
+    throw new Error("claimed a commit that never happened (ua-tracer-swf)");
+  }
+  if (!(await kv.get(hitKey)).value) {
+    throw new Error("the hit record was lost (ua-tracer-swf)");
+  }
+  const joined = warnings.join("\n");
+  if (!joined.includes(id)) throw new Error(`the warning does not name the trace: ${joined}`);
+  if (!joined.includes("backfill")) {
+    throw new Error(`the warning does not name the repair command: ${joined}`);
+  }
+});
+
+// ---- ua-tracer-emp (P2 residual): no path out of commitHit may throw ----
+// If KV rejected the record and the identity-only retry also failed, the old fallback
+// awaited `kv.set` with the very record KV had rejected, so the TypeError escaped as an
+// unhandled 500 and the probe was lost with it.
+
+Deno.test("a KV that rejects the record cannot throw out of commitHit", async () => {
+  await clearKv();
+  const kv = await testKv();
+  const { id } = await mintOnce();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+
+  const written: Array<{ key: Deno.KvKey; value: HitRecord }> = [];
+  const rejecting = {
+    get: (key: Deno.KvKey) => kv.get(key),
+    set: (key: Deno.KvKey, value: HitRecord) => {
+      written.push({ key, value });
+      return Promise.resolve({ ok: true, versionstamp: "v9" });
+    },
+    atomic: () => {
+      const chain = {
+        check: () => chain,
+        set: () => chain,
+        commit: () => Promise.reject(new TypeError("value too large")),
+      };
+      return chain;
+    },
+  } as unknown as Deno.Kv;
+
+  const rec: HitRecord = {
+    id,
+    kind: "css",
+    ts: Date.now(),
+    ua: UA,
+    ip: IP,
+    method: "GET",
+    headers: { "x-huge": "h".repeat(70_000) },
+  };
+  const hitKey: Deno.KvKey = ["hit", id, "emp0000000000000000000001"];
+  const warnings: string[] = [];
+  const outcome = await commitHit(rejecting, rec, hitKey, trace, {
+    warn: (line) => warnings.push(line),
+    deadlineMs: 5,
+  });
+
+  if (outcome !== "recorded-alone") throw new Error(`outcome ${outcome}`);
+  if (!written.length) throw new Error("the fallback wrote nothing");
+  const last = written[written.length - 1];
+  if (JSON.stringify(last.key) !== JSON.stringify(hitKey)) {
+    throw new Error(`the fallback wrote to ${JSON.stringify(last.key)}, not the hit key`);
+  }
+  const stored = last.value;
+  if (JSON.stringify(stored).length > 4096) {
+    throw new Error(
+      `the fallback stored ${JSON.stringify(stored).length} bytes, which KV can refuse`,
+    );
+  }
+  if (Object.keys(stored.headers).length) {
+    throw new Error("the fallback kept headers KV had rejected");
+  }
+  if (!warnings.join("\n").includes("backfill")) {
+    throw new Error(`no repair command in the warnings: ${warnings.join("\n")}`);
+  }
+});
+
+Deno.test("a header over the value cap is trimmed before the write, not rejected", async () => {
+  await clearKv();
+  const kv = await testKv();
+  const { id } = await mintOnce();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+  const rec: HitRecord = {
+    id,
+    kind: "css",
+    ts: Date.now(),
+    ua: UA,
+    ip: IP,
+    method: "GET",
+    headers: { "x-huge": "h".repeat(70_000) },
+  };
+  const hitKey: Deno.KvKey = ["hit", id, "hdr0000000000000000000001"];
+  const warnings: string[] = [];
+  const outcome = await commitHit(kv, rec, hitKey, trace, {
+    warn: (line) => warnings.push(line),
+  });
+  if (outcome !== "committed") throw new Error(`outcome ${outcome}`);
+  const stored = (await kv.get<HitRecord>(hitKey)).value;
+  if (!stored) throw new Error("nothing was stored");
+  if (JSON.stringify(stored).length > MAX_RECORD_BYTES) {
+    throw new Error(`stored ${JSON.stringify(stored).length} bytes, over the budget`);
+  }
+  if (!stored.headers["x-payload-truncated"]) {
+    throw new Error(`the trim is not marked: ${JSON.stringify(stored.headers)}`);
+  }
+});

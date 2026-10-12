@@ -138,17 +138,23 @@ The suites are the reason a green gate means something:
   pathological CAS contention an asset response can wait up to `CAS_DEADLINE_MS`
   (2 s). The hit's record and its increment are committed by ONE transaction, so
   the counter and the record set cannot disagree on the success path, and the
-  probe path is one round trip cheaper than it used to be (the record write is
-  folded into the atomic). The give-up path writes the record alone and warns,
+  probe path is one round trip cheaper than it used to be: the record write used to be
+  its own `kv.set` followed by a separate 2-check/3-set atomic (two sequential KV calls),
+  and it is now one 2-check/4-set atomic. The saving is that ROUND TRIP, not an op count -
+  the atomic itself carries one more operation. The give-up path writes the record alone and warns,
   naming the repair command, so a give-up leaves the count SHORT of the records
   rather than losing the probe or over-counting it. That trade is not forced by
   irreparability either: `deno task backfill` recomputes every snapshot from the
   raw hits (preserving the bot verdict the earlier rebuild dropped) and verifies
   what it wrote with a reconcile loop paced by `CAS_DEADLINE_MS`, so a snapshot
-  that a lost update left wrong is repairable. What repair cannot reach is a
-  record that was never stored at all - see the hit-key collision note below.
-  Moving the denormalisation off the response path is therefore a latency
-  decision nobody has taken rather than a repair-safety one; it is not proposed
+  that a lost update left wrong is repairable. That pacing is no longer the primary
+  protection for the increment path - the atomic is, so a lost count is repairable
+  rather than something the window prevents. What the window still covers is snapshots
+  written by versions before that atomic existed, and writers that clobber a snapshot
+  without a CAS check (`ua-tracer-5ub`); for those it remains evidence, not proof. What
+  repair cannot reach is a record that was never stored at all - see the hit-key
+  collision note below. Moving the denormalisation off the response path is therefore a
+  latency decision nobody has taken rather than a repair-safety one; it is not proposed
   here.
 - A probe's RECORD can still be lost before it is stored: the hit key is a
   microsecond timestamp, so two hits for one trace that sample the clock inside

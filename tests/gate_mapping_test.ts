@@ -7,8 +7,10 @@
 // the gate closed, and the full tier really is a superset of the affected tier.
 //
 // Permissions: this suite is run by its own deno task
-// (`deno task test:guards`) with --allow-read --allow-run=git,bash, because it
-// shells out to git and to the script. The other suites stay permission-tight.
+// (`deno task test:guards`) with --allow-env --allow-read --allow-write=.
+// --allow-run=git,bash,deno, because it shells out to git, to the gate script,
+// and (from ua-tracer-ha5) to `deno fmt --check` itself. The other suites stay
+// permission-tight.
 
 const repoRoot = Deno.realPathSync(new URL("..", import.meta.url));
 
@@ -360,6 +362,138 @@ Deno.test("the docs suite table and the suites on disk are the same set", async 
       "docs/speed.md's suite table and tests/ disagree" +
         ` - tiered but not tabled: ${missing.join(", ") || "(none)"}` +
         `; tabled but not on disk: ${extra.join(", ") || "(none)"}`,
+    );
+  }
+});
+
+// ua-tracer-ha5: the fmt:check, lint:check and typecheck tasks derive their path sets from the tree
+// instead of enumerating them, because an enumerated list is the thing that drifts - lint:check
+// listed eight paths and omitted crons.ts, so the gate's lint step stayed green while that file
+// carried a violation. That derivation rests on .gitignore: deno walks everything git does not
+// ignore. The assertions below turn that structural argument into a checked one, in the same spirit
+// as the table-vs-directory parity above.
+
+// The extensions `deno fmt` handles. Kept here rather than in deno.json because it describes what
+// deno does, not what this repository asks of it.
+const DENO_FMT_EXTENSIONS = [
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".md",
+  ".json",
+  ".jsonc",
+];
+
+const isFmtable = (f: string) => DENO_FMT_EXTENSIONS.some((e) => f.endsWith(e));
+
+async function gitLines(args: string[]): Promise<string[]> {
+  const out = await new Deno.Command("git", {
+    args,
+    cwd: repoRoot,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (out.code !== 0) {
+    const err = new TextDecoder().decode(out.stderr).trim();
+    throw new Error(`git ${args.join(" ")} failed: ${err}`);
+  }
+  return new TextDecoder().decode(out.stdout).split("\n").filter((l) => l.length > 0);
+}
+
+Deno.test("the files deno fmt would check are the files git considers - which is why the derived task cannot drift", async () => {
+  const out = await new Deno.Command("deno", {
+    args: ["fmt", "--check"],
+    cwd: repoRoot,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const text = new TextDecoder().decode(out.stdout) + new TextDecoder().decode(out.stderr);
+  const m = text.match(/Checked (\d+) files?/) ??
+    text.match(/not formatted files? in (\d+) files?/);
+  if (!m) {
+    throw new Error(
+      "could not read a file count out of `deno fmt --check` - has its output format changed? tail: " +
+        text.trim().slice(-200),
+    );
+  }
+  const denoCount = Number(m[1]);
+
+  // --cached --others --exclude-standard is git's "everything in the tree that is not ignored":
+  // tracked files plus untracked ones, which is the set deno walks. Comparing against tracked files
+  // alone would go red whenever a lane has an untracked scratch file, so this compares deno against
+  // the same set deno itself sees - a red here means deno stopped or started walking something.
+  const considered = (await gitLines(["ls-files", "--cached", "--others", "--exclude-standard"]))
+    .filter(isFmtable);
+  if (denoCount !== considered.length) {
+    throw new Error(
+      `deno fmt --check would check ${denoCount} files, but git considers ${considered.length} of the kinds deno formats ` +
+        "- the fmt:check task derives its set from the tree, so a difference means deno and git disagree " +
+        "about what is in it (has an ignore rule changed?)",
+    );
+  }
+});
+
+Deno.test("no tracked file deno would format is hidden from it by .gitignore", async () => {
+  // `git add -f` on generated evidence is the quiet version of this: the file is in the repository,
+  // so it looks covered, but deno skips it because an ignore rule matches, and the gate's fmt step
+  // reports a green verdict about a file it never read.
+  const trackedIgnored = (await gitLines(["ls-files", "-ci", "--exclude-standard"]))
+    .filter(isFmtable);
+  if (trackedIgnored.length) {
+    throw new Error(
+      `tracked but gitignored, so deno fmt and deno lint skip them entirely: ${
+        trackedIgnored.join(", ")
+      }`,
+    );
+  }
+});
+
+Deno.test("the generated gate evidence stays gitignored, because the derived checks rely on it", async () => {
+  // artifacts/ holds browser-journey evidence and throwaway Chrome profiles. deno fmt and deno lint
+  // walk everything git does not ignore, so if that rule goes away those checks start covering
+  // generated files - thousands of them - and their counts stop meaning what the test above assumes.
+  const out = await new Deno.Command("git", {
+    args: ["check-ignore", "-q", "artifacts"],
+    cwd: repoRoot,
+    stdout: "null",
+    stderr: "null",
+  }).output();
+  if (out.code !== 0) {
+    throw new Error(
+      "artifacts/ is no longer gitignored: deno fmt and deno lint would start checking generated " +
+        "gate evidence (throwaway Chrome profiles). Restore the ignore rule, or give the tasks an " +
+        "explicit exclusion.",
+    );
+  }
+});
+
+Deno.test("the check tasks derive their paths from the tree instead of enumerating them", async () => {
+  const cfg = JSON.parse(await Deno.readTextFile(new URL("../deno.json", import.meta.url)));
+  const tasks: Record<string, string> = cfg.tasks ?? {};
+  for (const name of ["fmt:check", "lint:check"]) {
+    const cmd = tasks[name];
+    if (typeof cmd !== "string") throw new Error(`deno.json has no ${name} task`);
+    // A path in the command is the drift ua-tracer-ha5 removed: lint:check listed eight paths and
+    // omitted crons.ts for as long as it existed, and fmt:check had the same shape.
+    const listed = cmd.match(/[\w./-]+\.(?:ts|tsx|js|mjs|json)/g);
+    if (listed) {
+      throw new Error(
+        `${name} enumerates paths again (${
+          listed.join(", ")
+        }) - derive them from the tree instead; ` +
+          "an enumerated list is what silently omitted crons.ts",
+      );
+    }
+  }
+  const typecheck = tasks["typecheck"];
+  if (typeof typecheck !== "string" || !typecheck.includes("*.ts")) {
+    throw new Error(
+      `typecheck should pass a glob (*.ts tests/*.ts) rather than a module list: ${typecheck}`,
     );
   }
 });

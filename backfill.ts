@@ -26,9 +26,21 @@
 //   folded in rather than reverted — and (b) after writing, verifies by
 //   re-listing and recomputing, pacing that verification by at least
 //   CAS_DEADLINE_MS. The pacing is what makes the check meaningful: a writer that
-//   lost a race is finished (committed or given up) within CAS_DEADLINE_MS of its
-//   first attempt, so a paced verification that finds the snapshot equal to a
-//   fresh recompute proves no writer is still straddling it.
+//   lost a race normally finishes (commits or gives up) within CAS_DEADLINE_MS of
+//   its first attempt, so a paced verification that finds a snapshot equal to a
+//   fresh recompute is good evidence that no writer is still straddling it.
+//   Evidence, NOT a guarantee, and the difference is the whole reason this file is
+//   careful about what it claims:
+//     - a writer descheduled (GC, CPU pressure) between reading and committing can
+//       still land its stale +1 AFTER the verification ran, which the loop then
+//       cannot see. The residual is not zero and it grows with the CAS conflict
+//       rate; the settle window keeps actively probed traces out of the pass, which
+//       lowers that rate but does not zero it (a trace can receive a hit after any
+//       quiet period - the largest observed span on live data is 240 s, not a bound).
+//     - so this pass REPAIRS a snapshot a lost update left wrong; it does not
+//       prevent the loss. Closing it needs atomicity: folding the raw record write
+//       into the same transaction as the increment (ua-tracer-3re) is what makes
+//       "the hit exists" and "the count includes it" a single fact.
 //   The loop is bounded and LOUD: a repair pass that cannot converge must never
 //   read as a clean pass, so unfinished traces are reported with their attempt
 //   counts and the command exits non-zero.
@@ -64,7 +76,7 @@ import {
 export const DEFAULT_SETTLE_MS = 300_000;
 /** Verification rounds before the pass declares itself unfinished. */
 export const DEFAULT_MAX_ROUNDS = 4;
-/** Pacing between a write and the verification that must confirm it (see above). */
+/** Pacing between a write and the verification that checks it (see above). */
 export const DEFAULT_VERIFY_PACING_MS = CAS_DEADLINE_MS;
 
 export interface BackfillOptions {
@@ -318,7 +330,8 @@ export async function runBackfill(
   const attempts = new Map<string, number>();
   let unsettled: UnsettledTrace[] = [];
   for (let round = 0; round < opts.maxRounds; round++) {
-    // Load-bearing pacing: >= the longest a writer can still be retrying.
+    // Pacing: normally >= the longest a writer can still be retrying. This
+    // narrows the straddle window; it does not close it (see the header).
     await opts.delay(opts.verifyPacingMs);
     const pending: UnsettledTrace[] = [];
     for (const { id, key } of targets) {

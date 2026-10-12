@@ -215,6 +215,11 @@ Deno.test("runBackfill reconstructs a current-schema snapshot from its hits", as
 // stored snapshot is the fresh recompute plus one. A pass that stopped at its
 // first comparison, or that re-committed a remembered value, would leave that
 // overcount in place forever.
+//
+// This pins REPAIR, not prevention: the test forces the poisoned state and shows
+// the loop corrects it. Nothing here can stop a straddle from happening - a writer
+// descheduled past its deadline can still land after the verification, which is
+// why the header says mitigated and ua-tracer-3re is the change that closes it.
 Deno.test("the verify loop repairs a snapshot an in-flight hit overcounts after the write", async () => {
   await clearKv();
   const kv = await testKv();

@@ -102,6 +102,22 @@ export function shortId(): string {
 
 // Recent-index key: newest sorts first (MAX - ts). Shared by the homepage
 // seeder and logHit's incremental updates so they target the same entry.
+//
+// This key is the AUTHORITATIVE serialization point for a trace's stats: writers
+// compare-and-set it (and the per-UA aggregate key) rather than the per-UA mirror,
+// which is a pure function of the same records and is written in the same atomic.
+// See commitHit for the reasoning.
+//
+// EDITOR RULE for anyone adding a key to the stats transaction (ua-tracer-7e7):
+// every key the transaction writes other than the per-hit key must be either
+//   (a) derived from the same records and written atomically with them - a MIRROR,
+//       which needs no check because it cannot disagree with this key, or
+//   (b) listed in the checks (as the aggregate key is).
+// Adding a contended non-derived key means the check list must grow with it, or the
+// CAS stops being a compare-and-set on the true state: it would then commit a
+// snapshot that never existed. That is the whole reason the per-UA mirror is written
+// here without a check and the aggregate is not. The checks themselves are in
+// commitHit's atomic.
 export function recentIndexKey(ts: number, id: string): [string, string, string] {
   const reverseKey = (Number.MAX_SAFE_INTEGER - ts).toString().padStart(20, "0");
   return ["recent", reverseKey, id];
@@ -144,23 +160,40 @@ export interface UaAggregate {
 // A deadline rather than a fixed attempt count handles concurrent sub-requests:
 // every CAS loser burns an attempt (measured: 9 of 12 hits recorded with a fixed
 // retry count). Awaiting this on the probe response path adds at most 2s under
-// pathological contention; dropping a count is permanent. Moving denormalisation
-// off the response path is a separate follow-up.
+// pathological contention; a count dropped that way is SHORT until it is repaired, not
+// permanent: `deno task backfill` re-derives counts from the records (ua-tracer-plx).
+// Since ua-tracer-3re the record and its increment are committed by ONE transaction, so
+// this deadline is no longer what keeps them in step. Moving denormalisation off the
+// response path is a separate follow-up.
 // Bound on how long a CAS retry loop may chase a contended key. Exported because the
-// backfill repair pass must pace its verification by at least this long: a writer that
-// lost a race is finished (committed or given up) within this window, which is what
-// makes a paced verification strong enough to prove no writer is still straddling it.
+// backfill repair pass paces its verification by at least this long: a writer that
+// lost a race normally finishes (commits or gives up) within this window, which makes
+// a paced verification good evidence that no writer is still straddling a rebuilt
+// snapshot. Evidence, not proof - a writer descheduled between its read and its commit
+// can still land afterwards; see backfill.ts's header for the full argument.
+//
+// WHAT THIS BOUND IS FOR NOW (ua-tracer-3re): it is NOT the primary protection for the
+// increment path - the record and its count are committed by one atomic, so a lost count
+// is repairable rather than something this window prevents. What it still covers is
+// snapshots written by versions before that atomic existed, and writers that clobber a
+// snapshot without a CAS check (ua-tracer-5ub). For those it remains evidence, not proof.
 export const CAS_DEADLINE_MS = 2000;
+/**
+ * Retry an atomic compare-and-set until it commits or the deadline passes.
+ * Returns whether it committed: callers that must repair a give-up (commitHit)
+ * need that answer, and before ua-tracer-3re nothing downstream could tell.
+ */
 export async function casRetry(
   what: string,
   attemptOnce: () => Promise<boolean>,
-): Promise<void> {
+  deadlineMs: number = CAS_DEADLINE_MS,
+): Promise<boolean> {
   const started = performance.now();
   for (let attempt = 1;; attempt++) {
-    if (await attemptOnce()) return;
-    if (performance.now() - started > CAS_DEADLINE_MS) {
+    if (await attemptOnce()) return true;
+    if (performance.now() - started > deadlineMs) {
       console.warn(`[kv] gave up updating ${what} after ${attempt} attempts`);
-      return;
+      return false;
     }
     // Small jittered backoff so the retries do not re-collide in lockstep.
     await new Promise((r) => setTimeout(r, 1 + Math.random() * 7));
@@ -189,63 +222,280 @@ export async function seedTrace(rec: TraceRecord, stats: TraceStats): Promise<vo
   });
 }
 
+/** The KV per-value cap is 65536 bytes (measured); keep a working margin below it. */
+export const MAX_RECORD_BYTES = 48 * 1024;
+
+export interface HitCommitOptions {
+  /** CAS retry bound. Tests inject a few ms so the give-up path is reachable fast. */
+  deadlineMs?: number;
+  /** Warning sink, so tests assert the loud degradation instead of scraping stderr. */
+  warn?: (line: string) => void;
+}
+
+/** How a hit's record and its count were reconciled. */
+export type HitCommitOutcome = "committed" | "recorded-alone" | "no-trace";
+
+function encodedSize(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+/** Drop the client-supplied display payload: it is what can push a record over the cap. */
+function stripPayload(rec: HitRecord): HitRecord {
+  const headers = { ...rec.headers };
+  delete headers["x-report-body"];
+  const { timing: _timing, ...rest } = rec;
+  return { ...rest, headers };
+}
+
+/**
+ * Keep a hit record inside the KV value cap BEFORE writing it. The cap is hard: an
+ * over-limit write throws, and on this path that used to mean an unhandled 500 and a
+ * probe lost at the RECORD layer - count and waterfall both short, with nothing
+ * anywhere saying so. Dropping the payload keeps the probe (its identity, its kind,
+ * its position in the waterfall) so the waterfall still shows it and the backfill
+ * pass still counts it, and the truncation is marked in the record and warned about
+ * rather than being silent.
+ */
+const MAX_HEADER_VALUE_CHARS = 4096;
+
+/**
+ * A client can send very long header values. Those are what the cheap early-out above
+ * must not skip past, because KV rejects the resulting value against its own cap.
+ */
+function hasHugeHeader(rec: HitRecord): boolean {
+  for (const value of Object.values(rec.headers)) {
+    if (value.length > MAX_HEADER_VALUE_CHARS) return true;
+  }
+  return false;
+}
+
+function boundRecord(rec: HitRecord, warn: (line: string) => void): HitRecord {
+  // Cheap first: only hits carrying a client-supplied payload can be large, so the
+  // common probe path pays nothing. A long HEADER value is the other way in, and it is
+  // the one KV rejects against its own cap without this function ever being asked
+  // (ua-tracer-emp's residual), so it has to be routed through the size check too.
+  if (
+    !rec.timing?.length && !rec.headers["x-report-body"] && !hasHugeHeader(rec)
+  ) return rec;
+  if (encodedSize(rec) <= MAX_RECORD_BYTES) return rec;
+
+  const marker = `payload dropped: ${
+    encodedSize(rec)
+  } bytes over the ${MAX_RECORD_BYTES}-byte budget`;
+  const stripped = stripPayload(rec);
+  let bounded: HitRecord = {
+    ...stripped,
+    headers: { ...stripped.headers, "x-payload-truncated": marker },
+  };
+  if (encodedSize(bounded) > MAX_RECORD_BYTES) {
+    // Even the metadata is over budget (a client can send very long header values).
+    // Identity is all the counters and the waterfall need, so keep exactly that.
+    bounded = {
+      id: rec.id,
+      kind: rec.kind,
+      ts: rec.ts,
+      ua: rec.ua.slice(0, 200),
+      ip: rec.ip,
+      method: rec.method,
+      headers: { "x-payload-truncated": marker },
+    };
+  }
+  warn(
+    `[hit] payload on trace ${rec.id} exceeded the KV value limit; stored without it (counts can be re-derived with: deno task backfill)`,
+  );
+  return bounded;
+}
+
+/**
+ * Reconcile a non-homepage hit's RECORD with its INCREMENT (ua-tracer-3re).
+ *
+ * The record is written by the same transaction that bumps the counters. That is the
+ * point of the fold: on the success path a record exists exactly when the counter has
+ * counted it, so a rebuild that recomputes from the records can no longer see a record
+ * whose increment is still in flight and add it a second time (the qvu overcount).
+ *
+ * Off the success path the record is never lost: a give-up, an over-limit payload or a
+ * missing trace row all fall back to writing the record alone, which leaves the count
+ * SHORT of the records - a state the warning names (with the repair command) and
+ * `deno task backfill` repairs from the records themselves. So the failure mode is
+ * "an increment is missing", never "a record is missing" and never a count that is
+ * higher than the record set.
+ *
+ * `recentKey` is the AUTHORITATIVE serialization point for a trace's stats. The
+ * transaction checks it (and the aggregate key) but not the per-UA mirror: the mirror
+ * is a pure function of the same records, written alongside them in the same atomic,
+ * so checking it could only cost a retry, never prevent corruption. plx's repair pass
+ * does check it, and that asymmetry is harmless for the same reason. The general rule
+ * for a key added here is stated beside `recentIndexKey`; the check list below must
+ * grow with any contended key that rule does not cover.
+ */
+export async function commitHit(
+  kv: Deno.Kv,
+  rec: HitRecord,
+  hitKey: Deno.KvKey,
+  trace: TraceRecord,
+  opts: HitCommitOptions = {},
+): Promise<HitCommitOutcome> {
+  const warn = opts.warn ?? ((line: string) => console.warn(line));
+  const recentKey = recentIndexKey(trace.ts, rec.id);
+  const uKey = uaIndexKey(trace.ua, trace.ts, rec.id);
+  const aKey = uaAggKey(trace.ua);
+
+  const bounded = boundRecord(rec, warn);
+  // The record KV may reject is no candidate for the fallback (ua-tracer-emp's second
+  // half), so the last-resort form is built here. It is small enough that KV cannot
+  // refuse it: identity is all the counters and the waterfall need.
+  const identityOnly: HitRecord = {
+    id: rec.id,
+    kind: rec.kind,
+    ts: rec.ts,
+    ua: rec.ua.slice(0, 200),
+    ip: rec.ip,
+    method: rec.method,
+    headers: {},
+  };
+
+  // A trace row can exist while its stats entry does not, and calling that "shouldn't
+  // happen" is what turned ua-tracer-swf into silent data loss: the old branch here
+  // returned success WITHOUT executing the atomic, so the record was never written
+  // while the caller was told it had committed. The state is reachable - rows are
+  // written by paths other than seedTrace (legacy traces from before the recent index
+  // existed, the verified-probe path), and the row a hit checks in logHit is a
+  // different read from the entry checked here, so the two can disagree. There is no
+  // counter to increment in that state and a CAS cannot invent one, so the honest
+  // outcome is the record-alone path below, said out loud.
+  if (!(await kv.get<TraceStats>(recentKey)).value) {
+    warn(
+      `[hit] trace ${rec.id} has no stats entry to increment (a sub-resource hit ahead of the seed, or a row written by another path); hit recorded without its count; run: deno task backfill`,
+    );
+    await storeRecordAlone(kv, hitKey, bounded, identityOnly, rec, warn);
+    return "recorded-alone";
+  }
+
+  const attempt = (record: HitRecord) =>
+    casRetry(`stats for trace ${rec.id}`, async () => {
+      const cur = await kv.get<TraceStats>(recentKey);
+      // Belt and braces: the check above saw an entry, but never report success for a
+      // transaction that did not run. Returning false retries, and the deadline turns
+      // it into the record-alone path rather than a lost record.
+      if (!cur.value) return false;
+      const s = cur.value;
+      const wasJsRan = s.jsRan;
+      s.assetCount += 1;
+      if (rec.kind === "js-ran") s.jsRan = true;
+      if (!s.kinds.includes(rec.kind)) s.kinds.push(rec.kind);
+      // Bump the UA aggregate only for the fields that change here: the jsRan
+      // counter flips exactly once per trace (false -> true).
+      const aggCur = await kv.get<UaAggregate>(aKey);
+      const agg = aggCur.value ??
+        { ua: trace.ua || "(no user-agent)", count: 0, jsRan: 0 };
+      const aggNext: UaAggregate = {
+        ua: agg.ua,
+        count: agg.count,
+        jsRan: agg.jsRan + (!wasJsRan && rec.kind === "js-ran" ? 1 : 0),
+      };
+      const res = await kv.atomic()
+        .check({ key: recentKey, versionstamp: cur.versionstamp })
+        .check({ key: aKey, versionstamp: aggCur.versionstamp })
+        .set(hitKey, record) // the fold: the record is written BY this transaction
+        .set(recentKey, s)
+        .set(uKey, s)
+        .set(aKey, aggNext)
+        .commit();
+      return res.ok;
+    }, opts.deadlineMs);
+
+  let committed: boolean;
+  let fallback = bounded;
+  try {
+    committed = await attempt(bounded);
+  } catch (err) {
+    // A write-time rejection (the 64 KiB cap is the realistic one) must not lose the
+    // probe silently: warn, then try once more with only the identity fields.
+    warn(
+      `[hit] KV rejected the record for trace ${rec.id} (${
+        (err as Error).message
+      }); retrying with its identity fields only`,
+    );
+    fallback = identityOnly;
+    try {
+      committed = await attempt(identityOnly);
+    } catch (err2) {
+      warn(
+        `[hit] KV rejected even the identity-only record for trace ${rec.id} (${
+          (err2 as Error).message
+        })`,
+      );
+      committed = false;
+    }
+  }
+  if (committed) return "committed";
+
+  // Give-up. The increment is lost, the record is not: keep the raw evidence so the
+  // probe still appears in the waterfall, and say loudly that the count is short.
+  warn(`[hit] hit recorded without its count (trace ${rec.id}); run: deno task backfill`);
+  await storeRecordAlone(kv, hitKey, fallback, identityOnly, rec, warn);
+  return "recorded-alone";
+}
+
+/**
+ * Store a hit's record without its increment, and never throw. ua-tracer-emp's residual
+ * was this step doing `await kv.set(hitKey, bounded)` with a record KV had already
+ * rejected, so the rejection escaped as an unhandled 500 and took the probe with it.
+ * `preferred` is tried first, then the identity-only form, and if even that is refused
+ * the loss is said out loud rather than swallowed - a lost probe must never be silent.
+ */
+async function storeRecordAlone(
+  kv: Deno.Kv,
+  hitKey: Deno.KvKey,
+  preferred: HitRecord,
+  identityOnly: HitRecord,
+  rec: HitRecord,
+  warn: (line: string) => void,
+): Promise<void> {
+  try {
+    await kv.set(hitKey, preferred);
+    return;
+  } catch (err) {
+    warn(
+      `[hit] KV rejected the hit record for trace ${rec.id} (${
+        (err as Error).message
+      }); retrying with its identity fields only`,
+    );
+  }
+  try {
+    await kv.set(hitKey, identityOnly);
+  } catch (err) {
+    warn(
+      `[hit] could not store any record for trace ${rec.id} (${
+        (err as Error).message
+      }); the probe is lost - check the KV limits before trusting this trace`,
+    );
+  }
+}
+
 export async function logHit(rec: HitRecord): Promise<void> {
   const kv = await getKv();
   // Sequence per trace so we can list hits in receive order. Use a counter via
   // atomic-ish read+write; collisions are fine (we order by ts then seq).
   const tsNanos = BigInt(rec.ts) * 1000000n +
     BigInt(Math.floor(performance.now() * 1000) % 1000000);
-  await kv.set(["hit", rec.id, tsNanos.toString().padStart(25, "0")], rec);
+  const hitKey: Deno.KvKey = ["hit", rec.id, tsNanos.toString().padStart(25, "0")];
 
-  // Update the denormalized stats stored IN the recent index entry so the
-  // homepage never has to list every trace's hits. The homepage hit seeds the
-  // entry (see handleHomepage); sub-requests bump it here. The recent key is
-  // derived from the TRACE's timestamp (not this hit's), so resolve the trace
-  // record to get it.
+  // Only a non-homepage hit has a count to keep in step with its record: the
+  // homepage entry is seeded by seedTrace (with its own CAS on the aggregate) and
+  // `rebuildStats` excludes kind "homepage" from assetCount, so there is no counter
+  // that could straddle it. A hit whose trace row is gone has no snapshot to update
+  // either. Both of those write the record alone, as they always have.
   if (rec.kind !== "homepage") {
     const trace = await kv.get<TraceRecord>(["trace", rec.id]);
-    const tv = trace.value;
-    if (tv) {
-      const recentKey = recentIndexKey(tv.ts, rec.id);
-      const uKey = uaIndexKey(tv.ua, tv.ts, rec.id);
-      const aKey = uaAggKey(tv.ua);
-      // Concurrent sub-requests (css-bg, js-ran, font, …) all update the same
-      // stats entry, so use an atomic compare-and-set on the versionstamp. A
-      // plain get→set races and loses updates (e.g. the jsRan flag getting
-      // clobbered). The same atomic also mirrors the snapshot to the per-UA
-      // index and bumps the per-UA aggregate, so all three views stay
-      // consistent. Retries are deadline-bounded, not attempt-bounded: a real
-      // browser fires ~12 sub-resources at once, every CAS loser burns an
-      // attempt, and a fixed 8-attempt count silently dropped updates
-      // (measured: 9 of 12 hits recorded).
-      await casRetry(`stats for trace ${rec.id}`, async () => {
-        const cur = await kv.get<TraceStats>(recentKey);
-        if (!cur.value) return true; // entry not seeded (shouldn't happen)
-        const s = cur.value;
-        const wasJsRan = s.jsRan;
-        s.assetCount += 1;
-        if (rec.kind === "js-ran") s.jsRan = true;
-        if (!s.kinds.includes(rec.kind)) s.kinds.push(rec.kind);
-        // Bump the UA aggregate only for the fields that change here: the
-        // jsRan counter flips exactly once per trace (false -> true).
-        const aggCur = await kv.get<UaAggregate>(aKey);
-        const agg = aggCur.value ??
-          { ua: tv.ua || "(no user-agent)", count: 0, jsRan: 0 };
-        const aggNext: UaAggregate = {
-          ua: agg.ua,
-          count: agg.count,
-          jsRan: agg.jsRan + (!wasJsRan && rec.kind === "js-ran" ? 1 : 0),
-        };
-        const res = await kv.atomic()
-          .check({ key: recentKey, versionstamp: cur.versionstamp })
-          .check({ key: aKey, versionstamp: aggCur.versionstamp })
-          .set(recentKey, s)
-          .set(uKey, s)
-          .set(aKey, aggNext)
-          .commit();
-        return res.ok;
-      });
+    if (trace.value) {
+      await commitHit(kv, rec, hitKey, trace.value);
+    } else {
+      await kv.set(hitKey, boundRecord(rec, (line) => console.warn(line)));
     }
+  } else {
+    await kv.set(hitKey, boundRecord(rec, (line) => console.warn(line)));
   }
 
   console.log(

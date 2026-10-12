@@ -250,3 +250,46 @@ Deno.test("usage errors exit 3 and a bad base ref exits 4", async () => {
   }).output();
   if (out.code !== 4) throw new Error(`bad GIT_BASE should exit 4, got ${out.code}`);
 });
+
+// The CAS deadline's coupling, asserted rather than assumed (ua-tracer-o9s).
+//
+// The give-up tests inject a tiny deadline so they cost milliseconds instead of the real
+// two seconds, which is the whole point of making it injectable. The risk that buys is
+// that someone weakens PRODUCTION's deadline, or starts passing a small one on the
+// request path, and the fast suite would never notice: the tests would still be green
+// because they never use the default. So the coupling is pinned in source, in the style
+// this file already uses for the gate scripts, because timing a real give-up would cost
+// exactly the two seconds the injection exists to avoid.
+//
+// This lives here rather than in kv_behaviour_test.ts (where the give-up tests are)
+// because that suite runs permission-tight and cannot read files.
+Deno.test("the injectable CAS deadline cannot quietly replace the production one", async () => {
+  const storage = await Deno.readTextFile(new URL("../storage.ts", import.meta.url));
+
+  // 1. The default IS the production bound.
+  if (!/deadlineMs: number\s*=\s*CAS_DEADLINE_MS/.test(storage)) {
+    throw new Error("casRetry's default deadline is no longer CAS_DEADLINE_MS");
+  }
+  // 2. It is threaded through, so injecting one actually works.
+  if (!/\}\s*,\s*opts\.deadlineMs\s*\)/.test(storage)) {
+    throw new Error("commitHit no longer passes opts.deadlineMs into casRetry");
+  }
+  // 3. The request path does NOT override it: a production probe must not inherit a
+  //    test's shortcut.
+  const logHit = storage.slice(storage.indexOf("export async function logHit"));
+  if (logHit.length === 0) throw new Error("logHit is gone");
+  const at = logHit.indexOf("commitHit(");
+  if (at < 0) throw new Error("logHit no longer records through commitHit");
+  const call = logHit.slice(at, at + 200);
+  if (call.includes("deadlineMs")) {
+    throw new Error(`logHit overrides the CAS deadline: ${call.split("\n")[0]}`);
+  }
+
+  // 4. And the fast path is fast because tests INJECT a deadline, not because the
+  //    default was weakened: if the injection disappears, the suite is paying 2s per
+  //    give-up test again and someone will be tempted to shorten the real one.
+  const suite = await Deno.readTextFile(new URL("./kv_behaviour_test.ts", import.meta.url));
+  if (!suite.includes("deadlineMs:")) {
+    throw new Error("no test injects a deadline; the give-up tests would cost the real 2s");
+  }
+});

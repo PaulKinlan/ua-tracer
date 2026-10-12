@@ -429,19 +429,28 @@ Deno.test("the files deno fmt would check cover every tracked file of the kinds 
   // scratch file open would be a test depending on machine state, which is a defect here.
   const untracked = (await gitLines(["ls-files", "--others", "--exclude-standard"]))
     .filter(isFmtable);
+  // Files still in the index but deleted from the worktree: deno cannot check what is not there, so
+  // counting them as "should be covered" produced a message blaming deno for SKIPPING a file the
+  // tree no longer has - ua-tracer-lpz's class, an assertion telling the reader something untrue.
+  // Subtracting them does not hide drift: a file that IS present and ignore-masked stays counted
+  // here and stays missing from deno's total, which the mutation matrix below proves.
+  const deleted = new Set(await gitLines(["ls-files", "-d"]));
+  const trackedHere = tracked.filter((f) => !deleted.has(f));
 
   const coveringTracked = denoCount - untracked.length;
-  if (coveringTracked !== tracked.length) {
-    const drift = coveringTracked < tracked.length
-      ? `deno is SKIPPING ${tracked.length - coveringTracked} file(s) that git tracks ` +
-        "(a tracked file matched an ignore rule - the assertion below names which)"
+  if (coveringTracked !== trackedHere.length) {
+    const drift = coveringTracked < trackedHere.length
+      ? `deno is SKIPPING ${trackedHere.length - coveringTracked} file(s) that git tracks ` +
+        "and the worktree still has (one of them matched an ignore rule - the assertion below " +
+        "names which)"
       : `deno is CHECKING ${
-        coveringTracked - tracked.length
+        coveringTracked - trackedHere.length
       } file(s) that git neither tracks nor ` +
         "lists as untracked";
     throw new Error(
       `deno fmt --check would check ${denoCount} files, ${untracked.length} of them untracked; that ` +
-        `leaves ${coveringTracked} covering the ${tracked.length} fmt-able files git tracks - ${drift}`,
+        `leaves ${coveringTracked} covering the ${trackedHere.length} fmt-able files git tracks ` +
+        `and the worktree still has - ${drift}`,
     );
   }
 });

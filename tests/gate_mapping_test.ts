@@ -405,7 +405,7 @@ async function gitLines(args: string[]): Promise<string[]> {
   return new TextDecoder().decode(out.stdout).split("\n").filter((l) => l.length > 0);
 }
 
-Deno.test("the files deno fmt would check are the files git considers - which is why the derived task cannot drift", async () => {
+Deno.test("the files deno fmt would check cover every tracked file of the kinds it formats", async () => {
   const out = await new Deno.Command("deno", {
     args: ["fmt", "--check"],
     cwd: repoRoot,
@@ -423,17 +423,25 @@ Deno.test("the files deno fmt would check are the files git considers - which is
   }
   const denoCount = Number(m[1]);
 
-  // --cached --others --exclude-standard is git's "everything in the tree that is not ignored":
-  // tracked files plus untracked ones, which is the set deno walks. Comparing against tracked files
-  // alone would go red whenever a lane has an untracked scratch file, so this compares deno against
-  // the same set deno itself sees - a red here means deno stopped or started walking something.
-  const considered = (await gitLines(["ls-files", "--cached", "--others", "--exclude-standard"]))
+  const tracked = (await gitLines(["ls-files"])).filter(isFmtable);
+  // deno walks the tree rather than the index, so a lane's untracked scratch file is counted by it
+  // too. Those are subtracted rather than asserted away: a guard that went red because someone has a
+  // scratch file open would be a test depending on machine state, which is a defect here.
+  const untracked = (await gitLines(["ls-files", "--others", "--exclude-standard"]))
     .filter(isFmtable);
-  if (denoCount !== considered.length) {
+
+  const coveringTracked = denoCount - untracked.length;
+  if (coveringTracked !== tracked.length) {
+    const drift = coveringTracked < tracked.length
+      ? `deno is SKIPPING ${tracked.length - coveringTracked} file(s) that git tracks ` +
+        "(a tracked file matched an ignore rule - the assertion below names which)"
+      : `deno is CHECKING ${
+        coveringTracked - tracked.length
+      } file(s) that git neither tracks nor ` +
+        "lists as untracked";
     throw new Error(
-      `deno fmt --check would check ${denoCount} files, but git considers ${considered.length} of the kinds deno formats ` +
-        "- the fmt:check task derives its set from the tree, so a difference means deno and git disagree " +
-        "about what is in it (has an ignore rule changed?)",
+      `deno fmt --check would check ${denoCount} files, ${untracked.length} of them untracked; that ` +
+        `leaves ${coveringTracked} covering the ${tracked.length} fmt-able files git tracks - ${drift}`,
     );
   }
 });

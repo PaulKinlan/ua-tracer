@@ -11,11 +11,13 @@
     "check:all": "deno task fmt:check && deno task lint:check && deno task typecheck",
 
     "test:file": "deno test --unstable-kv --allow-env",
-    "test:mapping": "deno test --unstable-kv --allow-env --allow-read --allow-write=. --allow-run=git,bash tests/gate_mapping_test.ts",
+    "test:guards": "deno test --unstable-kv --allow-env --allow-read --allow-write=. --allow-run=git,bash,deno tests/gate_mapping_test.ts tests/gate_config_test.ts",
     "test:fast": "bash tools/fast-gate.sh",
     "test:full": "bash tools/full-gate.sh",
     "test:browser": "deno test --unstable-kv --allow-env --allow-net --allow-write=artifacts --allow-run=google-chrome tests/browser_journey_test.ts",
-    "check": "bash tools/full-gate.sh"
+
+    "check": "bash tools/full-gate.sh",
+    "check:fast": "bash tools/fast-gate.sh"
   },
   "fmt": {
     "lineWidth": 100

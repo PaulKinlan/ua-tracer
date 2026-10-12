@@ -21,23 +21,30 @@ Both tiers include `deno task check:all` (fmt + lint + typecheck). The full tier
 is the fast tier with every suite, not the affected subset, plus the browser
 journey.
 
-`~/.fleet/check.conf` (VM-local, not in this repo) points at these:
+The deployed gate reads its commands from `~/.fleet/check.conf`, which is
+**machine-global** and copied there by the tracked config. The tracked source of
+truth is `tools/check.conf`; `bash tools/check-cmd.sh --install` writes it out (and
+`tools/check-cmd.sh` with no arguments prints the resolved set):
 
 ```sh
-CHECK_CMD="deno task test:full"
-CHECK_FAST_CMD="deno task test:fast"
+CHECK_CMD="deno task check"          # every suite + the browser journey
+CHECK_FAST_CMD="deno task check:fast" # fmt/lint/typecheck + affected suites only
 CHECK_TIMEOUT=300
 CHECK_FAST_TIMEOUT=60
 ```
 
-After changing the gate, `deno task test:mapping` proves the dispatcher again —
-including that an unmapped path still fails closed.
+`CHECK_CMD` may also be empty: fleet-check then falls through to its
+`deno.json` `.tasks.check` auto-detect, which needs no install step. Either way the
+full tier is the `check` task — `deno task test:full` is an alias kept because the
+hand-off and the VM's current install name it. The fast tier has **no** auto-detect,
+so `check:fast` (`test:fast`) is the only way it reaches the deployed gate. After
+changing the gate, `deno task test:guards` proves the dispatcher and the config
+again — including that an unmapped path still fails closed and that `--install`
+reproduces the tracked values.
 
 Implementers run `fleet-check --fast`. The **full** gate runs once per landing, on
 the merger's merged union — never from an implementer lane while the merger's gate
-is queued (one heavy slot per VM). `fleet-check` auto-detects `deno task check`
-from `deno.json` when the VM config is missing, so the `check` task aliases the
-full gate rather than being a third definition of it.
+is queued (one heavy slot per VM).
 
 ## Suites
 
@@ -50,7 +57,8 @@ full gate rather than being a third definition of it.
 | `tests/backfill_test.ts` | the recent-index legacy schema: rebuild, upgrade in place, idempotency, dangling entries |
 | `tests/backfill_verified_test.ts` | re-tagging traces with the IP-range verdict and mirroring it into both snapshots |
 | `tests/http_test.ts` | routing, status codes, security headers, probe/secret gating, cookies, HEAD, canonical redirect, well-known paths, sitemap, trace detail |
-| `tests/gate_mapping_test.ts` | this dispatcher: every tracked file is mapped, an unknown path fails closed, the full tier includes the fast suites |
+| `tests/gate_mapping_test.ts` | the dispatcher: every tracked file is mapped, an unknown path fails closed, a real delta resolves through `git diff`, the full tier includes the fast suites |
+| `tests/gate_config_test.ts` | `tools/check.conf` + `tools/check-cmd.sh`: the named tasks exist, `--install` reproduces the tracked values, a corrupt per-VM file is replaced rather than sourced, the budgets stay inside fleet R1/R2 |
 | `tests/browser_journey_test.ts` | **full tier only** — a real headless Chrome loads the minted page and the server records the CSS/JS/module/iframe/timing hits |
 
 ## Affected-path mapping
@@ -65,7 +73,7 @@ prints the mapping; `--dry-run` prints the resolved set):
 | `backfill-verified.ts` | `backfill_verified_test`, `unit_bot_test` |
 | `tests/<suite>.ts` | that suite, including the browser suite: a change to it is exactly when a browser run is worth paying for |
 | `tests/browser_journey_test.ts` | that suite, run as `deno task test:browser` (~3.6 s) |
-| `deno.json`, `tools/*`, `README.md`, `docs/*`, `LICENSE`, `.gitignore` | `gate_mapping_test` (the bounded subset that proves the dispatcher still maps) |
+| `deno.json`, `tools/*`, `README.md`, `docs/*`, `LICENSE`, `.gitignore` | `gate_mapping_test` (the bounded subset that proves the dispatcher still maps; both guard suites run on every invocation anyway) |
 | anything else | **fails closed (exit 2)**, naming the file |
 
 An empty delta runs every suite: "nothing changed" must never mean "nothing
@@ -87,8 +95,17 @@ The suites are the reason a green gate means something:
 - The browser tier builds its own server in-process (`Deno.serve` over the exported
   handler), uses 127.0.0.1 and a throwaway Chrome profile under `artifacts/`, and
   kills the browser in a `finally`.
-- Each suite file is a separate Deno test worker with its own in-memory KV, so
-  suites cannot depend on each other's order or state.
+- **Isolation: one worker per test file, one in-memory KV per worker.** `deno test`
+  distributes files across workers, and a worker that loads a file gets its own
+  evaluation of `tests/testenv.ts` and `server.ts` — measured 2026-10-12: two files
+  that both import a shared module with module-level state each saw `n=1`, and a KV
+  key written by one file was invisible to the other. The caveat: files that import
+  **each other** are merged into one worker (measured: the same probe with a direct
+  cross-import saw `n=2`), so suites must never import another suite. State that
+  *is* shared within a file (the module-level bot-range cache) is cleared by
+  `clearKv()`, which now drops both the KV keys and that cache.
+- Absolute assertions start from `clearKv()`; everything else uses unique trace ids
+  and UA names, so a suite cannot depend on another one's order or leftovers.
 
 ## Known gaps
 
@@ -99,6 +116,12 @@ The suites are the reason a green gate means something:
   the correct verification is an HTTP-level one (they are covered by `http_test`),
   and the browser suite documents why rather than asserting a claim a browser
   cannot make.
+- The denormalised stats update is awaited on the probe response path, so under
+  pathological CAS contention an asset response can wait up to `CAS_DEADLINE_MS`
+  (2 s). The trade-off is deliberate — a dropped count is a permanent data error,
+  a rare slow probe is not — and the give-up path logs a warning rather than
+  dropping silently. Moving the denormalisation off the response path is the real
+  fix and is filed as its own follow-up rather than smuggled into this change.
 - No coverage measurement yet: this change moves the project from zero executing
   tests to a gate, which is the precondition for a coverage threshold.
 
@@ -106,7 +129,10 @@ The suites are the reason a green gate means something:
 
 - **Tests must be independent.** No suite reads another suite's KV, a shared
   on-disk state, or the machine clock's absolute value; assertions are on
-  behaviour, and absolute counts are taken after a local `clearKv()`.
+  behaviour, and absolute counts are taken after a local `clearKv()`. Tests must
+  fail when the thing they test is broken (each new guard here was
+  mutation-checked: a 404'd probe, a no-retry CAS and a flipped expectation each
+  turn a specific suite red).
 - **The fast tier is the contract.** It is bounded and hermetic; if a change needs
   more than the fast tier, that is stated, not silently absorbed.
 - **One full gate per landing.** Never re-run an unchanged tree; verdicts are

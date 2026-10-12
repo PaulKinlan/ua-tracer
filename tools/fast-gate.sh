@@ -45,10 +45,12 @@ FAST_SUITES=(
 # verified by the code suites here and by the browser journey in the full gate.
 BROWSER_SUITES=(tests/browser_journey_test.ts)
 
-# Runs on every invocation, whatever the delta: the guard for this mapping (every
-# tracked file must be mapped; an unknown path must fail closed). It needs
-# --allow-run/--allow-read, so it is its own deno task.
-ALWAYS_SUITES=(tests/gate_mapping_test.ts)
+# Runs on every invocation, whatever the delta: the guards for the gate itself -
+# the mapping (every tracked file is mapped; an unknown path fails closed) and the
+# tracked check.conf (the two commands the deployed gate runs, and that --install writes
+# exactly those). They need --allow-run/--allow-read/--allow-write, so they are their own
+# deno task.
+ALWAYS_SUITES=(tests/gate_mapping_test.ts tests/gate_config_test.ts)
 
 ALL_SUITES=("${FAST_SUITES[@]}" "${BROWSER_SUITES[@]}")
 
@@ -107,8 +109,9 @@ map_one() {
       printf '%s\n' "$f"
       ;;
     # Config, tooling and documentation are not code, but they are still input to
-    # this gate: the mapping test is the bounded subset that proves the dispatcher
-    # still maps and still fails closed.
+    # this gate: the mapping guard is the bounded subset that proves the dispatcher
+    # still maps and still fails closed (and the config guard runs on every
+    # invocation regardless).
     deno.json | .gitignore | LICENSE | README.md | docs/* | tools/*)
       printf '%s\n' tests/gate_mapping_test.ts
       ;;
@@ -195,8 +198,8 @@ run_suites() {
 
   echo "$SELF: check:all (fmt + lint + typecheck)" >&2
   deno task check:all
-  echo "$SELF: mapping guard" >&2
-  deno task test:mapping
+  echo "$SELF: gate guards (mapping + tracked check.conf)" >&2
+  deno task test:guards
 
   local start=$SECONDS
   if [[ ${#fast[@]} -gt 0 ]]; then

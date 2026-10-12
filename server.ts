@@ -466,6 +466,14 @@ export function cidrContains4(cidr: string, ipInt: number): boolean {
 
 // Fetch + cache a source's prefixes in KV; refresh when older than the TTL.
 let _rangeCache: Map<string, { fetchedAt: number; prefixes: string[] }> | null = null;
+
+// Drop the in-process range cache. `_rangeCache` is checked BEFORE KV and holds a
+// 24h TTL, so anything that clears the KV ranges (tests, a manual re-seed) must
+// drop this too or it keeps serving the cleared prefixes. Exported for
+// tests/testenv.ts; not used by the request path.
+export function resetBotRangeCache(): void {
+  _rangeCache = null;
+}
 async function getBotRanges(
   source: { name: string; url: string },
 ): Promise<string[]> {
@@ -583,9 +591,13 @@ export interface UaAggregate {
 
 // Deadline-bounded compare-and-set retry for the denormalised KV snapshots.
 // `attemptOnce` returns true when it committed (or found nothing to update).
-// The bound is a deadline rather than an attempt count because contention is
-// proportional to the number of concurrent sub-requests for one trace and every
-// CAS loser burns an attempt — a small fixed count silently dropped updates.
+// Why a deadline and not an attempt count: contention is proportional to the number of
+// concurrent sub-requests for one trace and every CAS loser burns an attempt, so a small
+// fixed count silently dropped updates (measured: 9 of 12 hits recorded).
+// Why bounded and awaited: `logHit` runs before the asset response is chosen, so this is
+// also the worst-case extra latency on a probe response (2s, only under pathological
+// contention). Accuracy wins that trade - a dropped count is permanent - and moving the
+// denormalisation off the probe response path is the real fix, filed as a follow-up.
 const CAS_DEADLINE_MS = 2000;
 async function casRetry(
   what: string,

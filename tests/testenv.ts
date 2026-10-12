@@ -17,19 +17,27 @@ Deno.env.set("DENO_KV_URL", ":memory:");
 // A hosted-KV token would only add a way to get this wrong.
 Deno.env.delete("DENO_KV_ACCESS_TOKEN");
 
-import { getKv } from "../server.ts";
+import { getKv, resetBotRangeCache } from "../server.ts";
 
-/** The process-local in-memory KV every suite in this file shares. */
+/** The process-local in-memory KV this suite file is using. */
 export function testKv(): Promise<Deno.Kv> {
   return getKv();
 }
 
-/** Remove every key. Call at the start of a test that asserts absolute counts. */
+/**
+ * Remove every KV key AND drop server.ts's in-memory range cache.
+ *
+ * Both are needed: `_rangeCache` is consulted before KV and holds a 24h TTL, so a
+ * suite that clears the seeded ranges and then re-classifies would otherwise keep
+ * seeing the cleared prefixes. Call this at the start of any test that asserts
+ * absolute counts or a bot's classification from a known seed.
+ */
 export async function clearKv(): Promise<void> {
   const kv = await getKv();
   const keys: Deno.KvKey[] = [];
   for await (const entry of kv.list({ prefix: [] })) keys.push(entry.key);
   for (const key of keys) await kv.delete(key);
+  resetBotRangeCache();
 }
 
 /** Count entries under a prefix (used to assert "no new trace was minted"). */

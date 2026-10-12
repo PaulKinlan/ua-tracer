@@ -11,16 +11,21 @@
 import { clearKv, seedBotRanges } from "./testenv.ts";
 import { classifyBot } from "../server.ts";
 
-await clearKv();
-await seedBotRanges({
+// The published-range fixture. Kept in one place because the cache-reset test at
+// the end of this file wipes it and has to restore exactly this set, so the file
+// stays order-independent (tests run in declaration order).
+const RANGES: Record<string, string[]> = {
   "Googlebot": ["66.249.64.0/19"],
   "GPTBot": ["20.171.207.0/24"],
   "Bingbot": ["40.77.167.0/24"],
   // Anthropic publishes one list shared by ClaudeBot / Claude-User / Claude-SearchBot.
   "ClaudeBot": ["160.79.104.0/23"],
   "Applebot": ["17.241.208.0/24"],
-  // "OAI-SearchBot" is deliberately NOT seeded — see the fail-closed test.
-});
+  // "OAI-SearchBot" is deliberately NOT seeded - see the fail-closed test.
+};
+
+await clearKv();
+await seedBotRanges(RANGES);
 
 Deno.test("a claimed bot from inside its published range is verified", async () => {
   const v = await classifyBot("66.249.66.7", "Mozilla/5.0 (compatible; Googlebot/2.1)");
@@ -87,9 +92,31 @@ Deno.test("a non-bot user agent classifies as null", async () => {
 
 Deno.test("an unseeded range source fails closed: unverified, never verified", async () => {
   // OAI-SearchBot has no KV entry and there is no network in this suite, so
-  // `getBotRanges` cannot resolve a list. The result must be "unverified" —
+  // `getBotRanges` cannot resolve a list. The result must be "unverified" -
   // a missing/failed range fetch must never be able to assert "verified".
   const v = await classifyBot("20.171.207.9", "Mozilla/5.0 (compatible; OAI-SearchBot/1.0)");
   if (v?.bot !== "OAI-SearchBot") throw new Error(JSON.stringify(v));
   if (v.status !== "unverified") throw new Error(`expected unverified, got ${v.status}`);
+});
+
+Deno.test("clearing the KV also drops the in-memory range cache", async () => {
+  // `_rangeCache` is consulted before KV and holds a 24h TTL, so clearing the
+  // seeded ranges without dropping it would keep classifying from a cache the
+  // test believes it removed. The fixture is restored at the end so this test is
+  // safe wherever it sits.
+  const before = await classifyBot("66.249.66.7", "Googlebot/2.1");
+  if (before?.status !== "verified") throw new Error(`precondition: ${JSON.stringify(before)}`);
+
+  await clearKv();
+  const cleared = await classifyBot("66.249.66.7", "Googlebot/2.1");
+  // No KV ranges and no `--allow-net`, so it cannot resolve a list.
+  if (cleared?.status !== "unverified") {
+    throw new Error(`stale cache after clearKv: ${JSON.stringify(cleared)}`);
+  }
+
+  await seedBotRanges(RANGES);
+  const reseeded = await classifyBot("66.249.66.7", "Googlebot/2.1");
+  if (reseeded?.status !== "verified") {
+    throw new Error(`post-condition: ${JSON.stringify(reseeded)}`);
+  }
 });

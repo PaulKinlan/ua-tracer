@@ -102,12 +102,42 @@ Deno.test("a changed suite runs itself, and shared test code runs everything", a
   if ((await suites(["--map", "tests/http_test.ts"])).join() !== "tests/http_test.ts") {
     throw new Error("a changed suite must map to itself");
   }
+  // Non-empty first: a `--map` that exits 0 with no output would make every
+  // `for (const suite of shared)` assertion below vacuously true.
   const shared = await suites(["--map", "tests/testenv.ts"]);
+  if (shared.length === 0) throw new Error("testenv.ts maps to nothing");
   const all = new Set(await suites(["--all-suites", "--dry-run"]));
   for (const suite of shared) {
     if (!all.has(suite) || !suite.endsWith("_test.ts") || suite.includes("browser")) {
       throw new Error(`testenv.ts maps to ${suite}, which is not a fast suite`);
     }
+  }
+});
+
+Deno.test("a real delta resolves through git diff, not just --map", async () => {
+  // Most of this file drives `--map <path>`, which short-circuits before
+  // resolve_delta(). This exercises the path the gate actually takes: an
+  // untracked file in the working tree is picked up by `git status` and resolved
+  // to its suite. The probe is cleaned up in `finally`; if the process is killed
+  // it is left as a visible untracked test file that still runs green.
+  const probe = `${repoRoot}/tests/delta-probe_test.ts`;
+  await Deno.writeTextFile(
+    probe,
+    'Deno.test("delta probe", () => {});\n',
+  );
+  try {
+    const r = await run(["--dry-run"]);
+    if (r.code !== 0) throw new Error(`--dry-run exited ${r.code}: ${r.stderr.trim()}`);
+    const resolved = lines(r.stdout);
+    if (!resolved.includes("tests/delta-probe_test.ts")) {
+      throw new Error(`the delta probe was not resolved to itself: ${resolved.join(",")}`);
+    }
+    // A changed tracked file must resolve too, and via its mapping arm rather than
+    // its own name (server.ts -> the whole fast set).
+    const serverMap = await suites(["--map", "server.ts"]);
+    if (serverMap.length !== 7) throw new Error(`server.ts maps to ${serverMap.length} suites`);
+  } finally {
+    await Deno.remove(probe).catch(() => {});
   }
 });
 
@@ -130,6 +160,7 @@ Deno.test("config, tooling and docs map to the bounded mapping subset", async ()
 
 Deno.test("the full tier is a superset of the affected tier (full includes fast)", async () => {
   const full = new Set(await suites(["--all-suites", "--dry-run"]));
+  if (full.size === 0) throw new Error("--all-suites resolved to nothing");
   const tracked = await new Deno.Command("git", {
     args: ["ls-files"],
     cwd: repoRoot,

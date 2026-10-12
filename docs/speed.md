@@ -91,7 +91,7 @@ prints the mapping; `--dry-run` prints the resolved set):
 | `backfill-verified.ts` | `backfill_verified_test`, `unit_bot_test` |
 | `tests/<suite>.ts` | that suite, including the browser suite: a change to it is exactly when a browser run is worth paying for |
 | `tests/browser_journey_test.ts` | that suite, run as `deno task test:browser` (~3.6 s) |
-| `deno.json`, `tools/*`, `README.md`, `docs/*`, `LICENSE`, `.gitignore` | `gate_mapping_test` (the bounded subset that proves the dispatcher still maps; both guard suites run on every invocation anyway) |
+| `deno.json`, `tools/*`, `README.md`, `AGENTS.md`, `docs/*`, `LICENSE`, `.gitignore` | `gate_mapping_test` (the bounded subset that proves the dispatcher still maps; both guard suites run on every invocation anyway) |
 | anything else | **fails closed (exit 2)**, naming the file |
 
 An empty delta runs every suite: "nothing changed" must never mean "nothing

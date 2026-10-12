@@ -166,7 +166,17 @@ Deno.test("a real delta resolves through git diff, not just --map", async () => 
     // A changed tracked file must resolve too, and via its mapping arm rather than
     // its own name (server.ts -> the whole fast set).
     const serverMap = await suites(["--map", "server.ts"]);
-    if (serverMap.length !== 7) throw new Error(`server.ts maps to ${serverMap.length} suites`);
+    const fast = (await suites(["--all-suites", "--dry-run"]))
+      .filter((suite) =>
+        ![
+          "tests/browser_journey_test.ts",
+          "tests/gate_config_test.ts",
+          "tests/gate_mapping_test.ts",
+        ].includes(suite)
+      );
+    if ([...serverMap].sort().join() !== [...fast].sort().join()) {
+      throw new Error(`server.ts maps to ${serverMap.join()}, expected ${fast.join()}`);
+    }
   } finally {
     await Deno.remove(probe).catch(() => {});
   }
@@ -179,6 +189,7 @@ Deno.test("config, tooling and docs map to the bounded mapping subset", async ()
       "tools/fast-gate.sh",
       "tools/full-gate.sh",
       "README.md",
+      "AGENTS.md",
       "docs/speed.md",
     ]
   ) {

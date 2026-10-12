@@ -21,24 +21,19 @@ import {
 } from "./probes.ts";
 import { classifyBot } from "./bot-verification.ts";
 import {
-  casRetry,
   getKv,
   listHits,
   logHit,
   logProbe,
-  normUa,
-  recentIndexKey,
   recentProbes,
   recentTraces,
   type ResourceTiming,
   searchTracesByUa,
+  seedTrace,
   shortId,
   type TraceRecord,
   type TraceStats,
-  uaAggKey,
-  type UaAggregate,
   uaAggregate,
-  uaIndexKey,
 } from "./storage.ts";
 export { cidrContains4, classifyBot, ipv4ToInt } from "./bot-verification.ts";
 export type { BotVerification } from "./bot-verification.ts";
@@ -345,32 +340,7 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
       verified,
     };
 
-    // Persist the trace + recent index in one atomic write. The recent index
-    // value is a TraceStats snapshot (not just the id), so the homepage
-    // renders the list AND the per-UA counts WITHOUT any per-trace follow-up
-    // reads — this is what prevents the KV connection pool from being
-    // depleted under crawler load (the previous N+1 list() pattern caused
-    // POOL_DEPLETED 503s). The same snapshot is also written to the per-UA
-    // index so substring/exact-UA searches cover the whole corpus.
-    const kv = await getKv();
-    await kv.atomic()
-      .set(["trace", id], rec)
-      .set(recentIndexKey(ts, id), seedStats)
-      .set(uaIndexKey(ua, ts, id), seedStats)
-      .commit();
-    // Bump the per-UA aggregate (count of homepage traces by this UA). Its own
-    // CAS because it is a separate key that many traces share.
-    const aKey = uaAggKey(ua);
-    await casRetry(`ua aggregate ${normUa(ua)}`, async () => {
-      const aggCur = await kv.get<UaAggregate>(aKey);
-      const agg = aggCur.value ??
-        { ua: ua || "(no user-agent)", count: 0, jsRan: 0 };
-      const res = await kv.atomic()
-        .check({ key: aKey, versionstamp: aggCur.versionstamp })
-        .set(aKey, { ua: agg.ua, count: agg.count + 1, jsRan: agg.jsRan })
-        .commit();
-      return res.ok;
-    });
+    await seedTrace(rec, seedStats);
     // Also log the homepage itself as a hit so the trace waterfall has a root.
     await logHit({ id, kind: "homepage", ts, ua, ip, method: req.method, headers });
 

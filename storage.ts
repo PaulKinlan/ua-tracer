@@ -163,6 +163,28 @@ export async function casRetry(
   }
 }
 
+// Seed all three indexes before recording the homepage hit. The recent and UA
+// values are complete snapshots; the shared UA aggregate needs its own CAS.
+export async function seedTrace(rec: TraceRecord, stats: TraceStats): Promise<void> {
+  const kv = await getKv();
+  await kv.atomic()
+    .set(["trace", rec.id], rec)
+    .set(recentIndexKey(rec.ts, rec.id), stats)
+    .set(uaIndexKey(rec.ua, rec.ts, rec.id), stats)
+    .commit();
+  const aKey = uaAggKey(rec.ua);
+  await casRetry(`ua aggregate ${normUa(rec.ua)}`, async () => {
+    const aggCur = await kv.get<UaAggregate>(aKey);
+    const agg = aggCur.value ??
+      { ua: rec.ua || "(no user-agent)", count: 0, jsRan: 0 };
+    const res = await kv.atomic()
+      .check({ key: aKey, versionstamp: aggCur.versionstamp })
+      .set(aKey, { ua: agg.ua, count: agg.count + 1, jsRan: agg.jsRan })
+      .commit();
+    return res.ok;
+  });
+}
+
 export async function logHit(rec: HitRecord): Promise<void> {
   const kv = await getKv();
   // Sequence per trace so we can list hits in receive order. Use a counter via

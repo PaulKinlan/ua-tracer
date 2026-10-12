@@ -27,6 +27,17 @@ set -euo pipefail
 
 readonly SELF="fast-gate"
 
+# NO COLOUR IN THE GATE LOG. ~/fleet/remote/check-coverage.py parses this output to record
+# which suites ran and which changed files it could not attribute, and ANSI escapes break
+# that matching: with colour, a captured suite name is `tests/http_test.ts\x1b[0m`, which
+# compares unequal to `tests/http_test.ts`, so every changed file was published as
+# "unmapped" and every suite as "omitted" in the cached verdict (measured 2026-10-12 on
+# f564d6a). A reviewer reads that record, so it has to be plain text.
+# f564d6a). A reviewer reads that record, so it has to be plain text. (The one escape left
+# in the log is Deno's own `Task …` banner, which `fleet-check` prints before this script
+# runs and which carries no suite names, so the parser is unaffected.)
+export NO_COLOR=1
+
 # Hermetic suites: `deno task test:file` (--unstable-kv --allow-env, and
 # deliberately NOT --allow-net). Fixed order so two runs of the same delta are
 # comparable.
@@ -176,6 +187,10 @@ resolve_delta() {
   done
 
   if [[ ${#unknown[@]} -gt 0 ]]; then
+    # The `fast-gate: unmapped:` form is a CONTRACT with the fleet's log parser
+    # (~/fleet/remote/check-coverage.py matches exactly this marker and publishes the list
+    # with the cached verdict). The human-readable lines below are for the lane reading it.
+    echo "$SELF: unmapped: ${unknown[*]}" >&2
     echo "$SELF: UNMAPPED changed path(s): ${unknown[*]}" >&2
     echo "$SELF: add an arm to map_one() in $0 for each path above." >&2
     return 2
@@ -203,12 +218,16 @@ run_suites() {
 
   local start=$SECONDS
   if [[ ${#fast[@]} -gt 0 ]]; then
+    # Same contract as `unmapped:` above: this marker is how the fleet's parser learns the
+    # exact suite names that ran, in a form it can match without guessing at runner output.
+    echo "$SELF: ran: ${fast[*]}" >&2
     echo "$SELF: fast suites: ${fast[*]}" >&2
     deno task test:file "${fast[@]}"
     echo "$SELF: ${#fast[@]} fast suite(s) in $((SECONDS - start))s" >&2
   fi
   if [[ ${#browser[@]} -gt 0 ]]; then
     local browser_start=$SECONDS
+    echo "$SELF: ran: ${browser[*]}" >&2
     echo "$SELF: browser suites (headless Chrome): ${browser[*]}" >&2
     deno task test:browser
     echo "$SELF: browser suite in $((SECONDS - browser_start))s" >&2

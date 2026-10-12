@@ -80,6 +80,11 @@ Deno.test("an unmapped file in the delta fails the gate closed, naming the file"
     if (!r.stderr.includes("UNMAPPED-PROBE.tmp")) {
       throw new Error(`the failure did not name the file: ${r.stderr.trim()}`);
     }
+    // `fast-gate: unmapped:` is a contract with the fleet's log parser, which publishes
+    // the list alongside the cached verdict.
+    if (!r.stderr.includes("fast-gate: unmapped: UNMAPPED-PROBE.tmp")) {
+      throw new Error(`no parser marker for the unmapped file: ${r.stderr.trim()}`);
+    }
   } finally {
     await Deno.remove(probe);
   }

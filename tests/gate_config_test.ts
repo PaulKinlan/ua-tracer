@@ -187,6 +187,32 @@ Deno.test("the resolver prints a single key, an override wins, and an unknown ke
   if (bad.code !== 3) throw new Error(`unknown key should exit 3, got ${bad.code}`);
 });
 
+Deno.test("the gate log stays plain text and carries the fleet parser's markers", async () => {
+  // ~/fleet/remote/check-coverage.py parses the gate log to record which suites ran and
+  // which changed files it could not attribute. Colour codes make a captured suite name
+  // `tests/http_test.ts\x1b[0m`, which compares unequal to the real name, so every changed
+  // file was published as "unmapped" in the cached verdict (measured 2026-10-12). These are
+  // static checks because running a real suite here would make the guards tier slow.
+  for (const script of ["tools/fast-gate.sh", "tools/full-gate.sh"]) {
+    const body = await Deno.readTextFile(`${repoRoot}/${script}`);
+    if (!/^export NO_COLOR=1$/m.test(body)) {
+      throw new Error(
+        `${script} does not export NO_COLOR=1 (the fleet log parser needs plain text)`,
+      );
+    }
+  }
+  const gate = await Deno.readTextFile(`${repoRoot}/tools/fast-gate.sh`);
+  // The markers exactly as the script echoes them (`$SELF` IS "fast-gate"). A behavioural
+  // check for `unmapped:` lives in gate_mapping_test.ts, where an unmapped delta is cheap
+  // to construct; `ran:` only appears on a real run, so its guard is this string check.
+  for (const marker of [": unmapped: ", ": ran: "]) {
+    if (!gate.includes(marker)) {
+      throw new Error(`tools/fast-gate.sh no longer emits the parser marker "${marker}"`);
+    }
+  }
+  if (!gate.includes("NO_COLOR=1")) throw new Error("tools/fast-gate.sh lost its NO_COLOR export");
+});
+
 Deno.test("the fast gate is the command the config names, and it fails closed", async () => {
   // `deno task check:fast` must be the dispatcher, not a copy of it: drive it through the
   // task with the dispatcher's own query modes.

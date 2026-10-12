@@ -12,6 +12,9 @@
 set -euo pipefail
 
 readonly SELF="full-gate"
+# Plain-text log: the fleet's coverage parser reads this output (see tools/fast-gate.sh,
+# which this script execs and which sets the same variable for the suites it runs).
+export NO_COLOR=1
 cd "$(git rev-parse --show-toplevel)"
 
 echo "$SELF: every suite (not affected-only), including the browser journey" >&2

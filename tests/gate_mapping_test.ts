@@ -7,7 +7,7 @@
 // the gate closed, and the full tier really is a superset of the affected tier.
 //
 // Permissions: this suite is run by its own deno task
-// (`deno task test:mapping`) with --allow-read --allow-run=git,bash, because it
+// (`deno task test:guards`) with --allow-read --allow-run=git,bash, because it
 // shells out to git and to the script. The other suites stay permission-tight.
 
 const repoRoot = Deno.realPathSync(new URL("..", import.meta.url));
@@ -322,5 +322,44 @@ Deno.test("the cron registration sits inside the entrypoint guard", async () => 
   const crons = await Deno.readTextFile(new URL("../crons.ts", import.meta.url));
   if (/^\s*if \(import\.meta\.main\)/m.test(crons)) {
     throw new Error("crons.ts guards on import.meta.main, which is false in production");
+  }
+});
+
+// The ## Suites table in docs/speed.md is the only place a reader learns which suites exist, and
+// it drifted from disk once: tests/cron_test.ts was tiered in tools/fast-gate.sh and named in the
+// affected-path mapping, but never tabled (ua-tracer-h6o). A doc table that silently disagrees
+// with the tier list is what makes the tier system untrustworthy, and the check is cheap - the
+// guard already runs with --allow-read - so it is asserted here rather than left to a reviewer to
+// notice. The table and the *_test.ts files on disk must be the same SET, in both directions:
+// a new suite has to be tabled in the same change, and a deleted one cannot linger in the docs.
+Deno.test("the docs suite table and the suites on disk are the same set", async () => {
+  const doc = await Deno.readTextFile(new URL("../docs/speed.md", import.meta.url));
+  const from = doc.indexOf("## Suites");
+  const to = doc.indexOf("## Affected-path mapping");
+  if (from < 0 || to < from) throw new Error("docs/speed.md no longer has a ## Suites section");
+  const section = doc.slice(from, to);
+
+  const tabled = new Set<string>();
+  for (const m of section.matchAll(/^\|\s*`(tests\/[A-Za-z0-9_.-]+_test\.ts)`/gm)) {
+    tabled.add(m[1]);
+  }
+  if (tabled.size === 0) {
+    throw new Error("the ## Suites table parsed as empty - has its format changed?");
+  }
+
+  const onDisk = new Set<string>();
+  for await (const entry of Deno.readDir(new URL("../tests", import.meta.url))) {
+    if (entry.isFile && entry.name.endsWith("_test.ts")) onDisk.add(`tests/${entry.name}`);
+  }
+  if (onDisk.size === 0) throw new Error("no *_test.ts found on disk - wrong directory?");
+
+  const missing = [...onDisk].filter((s) => !tabled.has(s)).sort();
+  const extra = [...tabled].filter((s) => !onDisk.has(s)).sort();
+  if (missing.length || extra.length) {
+    throw new Error(
+      "docs/speed.md's suite table and tests/ disagree" +
+        ` - tiered but not tabled: ${missing.join(", ") || "(none)"}` +
+        `; tabled but not on disk: ${extra.join(", ") || "(none)"}`,
+    );
   }
 });

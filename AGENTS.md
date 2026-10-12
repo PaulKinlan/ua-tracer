@@ -11,21 +11,22 @@ Live at uatracer.com, Deno Deploy, state in Deno KV.
 
 ## Layout
 
-The **entrypoint is `server.ts`** (exported `handler`; Deno Deploy runs it as a dynamic runtime).
-Everything the app does at request time lives behind it: routing, the KV schema and denormalised
-indexes, probe assets, bot IP-range verification, and the server-rendered pages. `backfill.ts` and
-`backfill-verified.ts` are one-off maintenance over stored traces.
-
-Which top-level modules exist is whatever `git ls-files '*.ts'` says — at the time of writing that is
-`server.ts`, `backfill.ts`, `backfill-verified.ts` and the test suites — and **every one of them must
-appear in `map_one()` in `tools/fast-gate.sh`**. Do not mirror the tree in this file; a refactor
-splitting `server.ts` moves modules and must update the map, not this paragraph.
+The **entrypoint is `server.ts`** (exported `handler`; Deno Deploy runs it as a dynamic runtime). It
+owns the route table, the HTTP semantics (canonical redirect, HEAD, security headers), the periodic
+refresh and `Deno.serve` under `import.meta.main`. The request-time work behind it is split by
+responsibility, and which top-level modules exist is whatever `git ls-files '*.ts'` says — at the time
+of writing that is the table below. **Every one of them must appear in `map_one()` in
+`tools/fast-gate.sh`**; do not mirror the tree in this file, because a refactor moves modules and must
+update the map rather than silently making this page false.
 
 | Path | What it is |
 | --- | --- |
-| `server.ts` | The entrypoint (see above). Exports the pure helpers and `handler` so tests can drive it. |
-| `backfill.ts` | One-off maintenance over stored traces (`deno task backfill`). Importable; body is under `import.meta.main`. |
-| `backfill-verified.ts` | Retroactively re-tags traces with the IP-range verdict and mirrors it into both index snapshots (`deno task backfill-verify`). |
+| `server.ts` | The entrypoint: routing, request/response semantics, the probe-hit write path, `handler`, `Deno.serve`. |
+| `storage.ts` | The stable KV schema and trace/probe persistence (key builders, `getKv()`, `casRetry`, listing). No HTTP entrypoint imports. |
+| `bot-verification.ts` | Published bot CIDR verification and the `verified` / `unverified` / `unverifiable` verdict; range fetch + cache. |
+| `probes.ts` | The probe URL contract and the generated resource bodies (CSS/JS/PNG/GIF/woff2/manifest/iframe). |
+| `views.ts` | Pure HTML rendering for the pages; storage and network access belong to the entrypoint. |
+| `backfill.ts`, `backfill-verified.ts` | One-off maintenance over stored traces (`deno task backfill`, `backfill-verify`); both importable, bodies under `import.meta.main`. |
 | `tools/fast-gate.sh` | The affected-path dispatcher. **The only place the path→suite map exists.** |
 | `tools/full-gate.sh` | Thin wrapper: `fast-gate.sh --all-suites`. |
 | `tools/check.conf` | Tracked gate commands + budgets (source of truth for the VM config). |
@@ -40,12 +41,12 @@ splitting `server.ts` moves modules and must update the map, not this paragraph.
 | Tier | Command | Budget | Who runs it |
 | --- | --- | --- | --- |
 | Fast | `deno task check:fast` (= `test:fast`) | fleet R2, 60 s; measured ~3–7 s | Every lane, on every change, before hand-off (`fleet-check --fast`). |
-| Full | `deno task check` (= `test:full`) | fleet R1, 300 s; measured ~7–9 s | **The merger only**, once per landing on the merged union (`fleet-check --full` if you are landing). |
+| Full | `deno task check` (= `test:full`) | fleet R1, 300 s; measured ~8 s warm, ~15 s cold (the browser journey is 4–6 s of it) | **The merger only**, once per landing on the merged union (`fleet-check --full` if you are landing). |
 | One suite | `deno task test:file tests/http_test.ts` | — | While iterating. |
 | Guards only | `deno task test:guards` | — | When you touch the gate, the config or this file. |
 
-`deno task check:all` (fmt `--check`, lint, `deno check`) is included in both tiers. The tiers run 74
-tests: 16 gate guards, 57 code, 1 real-browser journey.
+`deno task check:all` (fmt `--check`, lint, `deno check`) is included in both tiers. The tiers run 80
+tests: 17 gate guards, 62 code, 1 real-browser journey across 12 suites plus `tests/testenv.ts`.
 
 `fleet-check` refuses the full gate from a non-merger lane in its own words ("the FULL gate is the
 merger's job, not a lane's"), because every non-merger full run costs the VM's single heavy slot a
@@ -74,10 +75,14 @@ The authoritative map is `map_one()` in `tools/fast-gate.sh`; the table below an
 | Changed path | Suites |
 | --- | --- |
 | `server.ts`, `tests/testenv.ts` | every non-browser suite |
+| `storage.ts` (KV schema) | `unit_keys`, `kv_behaviour`, `backfill`, `backfill_verified`, `http` |
+| `bot-verification.ts` | `unit_bot`, `unit_format`, `backfill_verified`, `http` |
+| `probes.ts` | `unit_probes`, `http`, `kv_behaviour` |
+| `views.ts` | `unit_views`, `unit_format`, `http` |
 | `backfill.ts` | `backfill_test` |
 | `backfill-verified.ts` | `backfill_verified_test`, `unit_bot_test` |
 | `tests/<suite>.ts` | that suite (a changed browser suite runs the browser journey) |
-| `deno.json`, `.gitignore`, `LICENSE`, `README.md`, `docs/*`, `tools/*` | `gate_mapping_test` |
+| `deno.json`, `.gitignore`, `LICENSE`, `README.md`, `AGENTS.md`, `docs/*`, `tools/*` | `gate_mapping_test` |
 | anything else | **exit 2, fail closed** |
 
 Both guard suites (`gate_mapping_test`, `gate_config_test`) run on every invocation. An empty delta
@@ -112,13 +117,13 @@ State lives entirely in KV (Deno Deploy isolates restart often — never an in-m
 
 Two things a lane must not break:
 
-1. **`getKv()` is lazy and memoised** (`server.ts:14-26`) — never top-level `await Deno.openKv()`;
-   it breaks Deno Deploy builds. `DENO_KV_URL` overrides the URL (the tests point it at `:memory:`).
+1. **`getKv()` is lazy and memoised** (`storage.ts:7`) — never top-level `await Deno.openKv()`; it
+   breaks Deno Deploy builds. `DENO_KV_URL` overrides the URL (the tests point it at `:memory:`).
 2. **Sub-request hits update the recent-index snapshot through a deadline-bounded compare-and-set**
-   (`casRetry`, `CAS_DEADLINE_MS = 2000`). A plain get→set loses updates: measured 9 of 12 concurrent
-   sub-requests dropped with the old attempt-bounded loop. Do not simplify it back. The write is
-   awaited before the asset response is chosen, so probe latency can reach ~2 s under pathological
-   contention — deliberate (a dropped count is permanent), tracked as `ua-tracer-c02`.
+   (`casRetry`, `CAS_DEADLINE_MS = 2000`, `storage.ts:149`). A plain get→set loses updates: measured 9
+   of 12 concurrent sub-requests dropped with the old attempt-bounded loop. Do not simplify it back.
+   The write is awaited before the asset response is chosen, so probe latency can reach ~2 s under
+   pathological contention — deliberate (a dropped count is permanent), tracked as `ua-tracer-c02`.
 
 ## Request invariants
 

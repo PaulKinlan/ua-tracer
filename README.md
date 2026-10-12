@@ -8,9 +8,9 @@ JavaScript — or just download the `.js` file and stop? And, crucially, **is it
 User-Agent claims to be**?
 
 This matters most for crawlers — ClaudeBot, GPTBot, Googlebot, Bingbot, Applebot, and the long tail
-of AI scrapers. ua-tracer lets you point any user agent at a URL and see, request by request, exactly
-how far it went — and checks the source IP against the ranges the bot operator publishes so you can
-tell a real crawler from a spoofed User-Agent.
+of AI scrapers. ua-tracer lets you point any user agent at a URL and see, request by request,
+exactly how far it went — and checks the source IP against the ranges the bot operator publishes so
+you can tell a real crawler from a spoofed User-Agent.
 
 Live at **[uatracer.com](https://uatracer.com)**. Built with Deno + Deno KV, hosted on Deno Deploy.
 Styled after [aifoc.us](https://aifoc.us).
@@ -35,26 +35,26 @@ before secrets existed keep the legacy `/r/{id}/...` form.)
 On top of the direct assets, the page and its assets reference _further_ probes — this is where the
 interesting signal comes from:
 
-| Probe (`/r/{id}/{secret}/…`) | Referenced from | Hitting it proves… |
-| --- | --- | --- |
-| `css-bg.png` | `background-image:` on a rendered element, inside `style.css` | the UA parsed the CSS, rendered the box, and followed a URL inside it |
-| `css-font.woff2` | `@font-face { src: }` used by rendered text, inside `style.css` | the UA resolved a CSS `@font-face` source |
-| `import.css` | `@import` at the top of `style.css` | the UA followed a CSS `@import` |
-| `manifest.json` → `manifest-icon.png` | `<link rel="manifest">`, then `icons[].src` inside it | the UA fetched **and parsed** the web-app manifest |
-| `favicon.ico` / `apple-touch-icon.png` | `<link rel="icon">` / `<link rel="apple-touch-icon">` | the UA fetched the favicon / iOS home-screen icon |
-| `preload.png` / `prefetch.png` | `<link rel="preload" as="image">` / `<link rel="prefetch">` | the UA honoured a speculative preload / prefetch hint |
-| `og-image.png` / `twitter-image.png` | `<meta property="og:image">` / `<meta name="twitter:image">` | a social unfurler fetched the Open Graph / Twitter card image |
-| the `<iframe>` document → `iframe-img.png` | `<iframe src>`, then an `<img>` inside that document | the UA loaded **and parsed** the subframe |
-| `js-ran.gif` | `new Image().src = …` inside `main.js`, at runtime | the UA **executed** classic JS (not merely downloaded it) |
-| `module.js` → `module-ran.gif` | `<script type="module">`, then a runtime beacon inside it | the UA **executed an ES module** (some run classic JS but not modules) |
-| `csp-report` / `report` | a `report-uri` / `report-to` CSP directive | the UA **enforced CSP** and posted a violation report |
-| `timing` | a `POST` from `main.js` carrying `performance.getEntriesByType('resource')` | a real engine ran and produced a client-side waterfall |
+| Probe (`/r/{id}/{secret}/…`)               | Referenced from                                                             | Hitting it proves…                                                     |
+| ------------------------------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `css-bg.png`                               | `background-image:` on a rendered element, inside `style.css`               | the UA parsed the CSS, rendered the box, and followed a URL inside it  |
+| `css-font.woff2`                           | `@font-face { src: }` used by rendered text, inside `style.css`             | the UA resolved a CSS `@font-face` source                              |
+| `import.css`                               | `@import` at the top of `style.css`                                         | the UA followed a CSS `@import`                                        |
+| `manifest.json` → `manifest-icon.png`      | `<link rel="manifest">`, then `icons[].src` inside it                       | the UA fetched **and parsed** the web-app manifest                     |
+| `favicon.ico` / `apple-touch-icon.png`     | `<link rel="icon">` / `<link rel="apple-touch-icon">`                       | the UA fetched the favicon / iOS home-screen icon                      |
+| `preload.png` / `prefetch.png`             | `<link rel="preload" as="image">` / `<link rel="prefetch">`                 | the UA honoured a speculative preload / prefetch hint                  |
+| `og-image.png` / `twitter-image.png`       | `<meta property="og:image">` / `<meta name="twitter:image">`                | a social unfurler fetched the Open Graph / Twitter card image          |
+| the `<iframe>` document → `iframe-img.png` | `<iframe src>`, then an `<img>` inside that document                        | the UA loaded **and parsed** the subframe                              |
+| `js-ran.gif`                               | `new Image().src = …` inside `main.js`, at runtime                          | the UA **executed** classic JS (not merely downloaded it)              |
+| `module.js` → `module-ran.gif`             | `<script type="module">`, then a runtime beacon inside it                   | the UA **executed an ES module** (some run classic JS but not modules) |
+| `csp-report` / `report`                    | a `report-uri` / `report-to` CSP directive                                  | the UA **enforced CSP** and posted a violation report                  |
+| `timing`                                   | a `POST` from `main.js` carrying `performance.getEntriesByType('resource')` | a real engine ran and produced a client-side waterfall                 |
 
 A plain downloader fetches the HTML and maybe the directly-referenced assets. A CSS-aware fetcher
 also hits `css-bg.png` / `css-font.woff2` / `import.css`. A UA that parses the manifest reaches
 `manifest-icon.png`. Social unfurlers (facebookexternalhit, Twitterbot, Slackbot, Discordbot,
-LinkedInBot) tend to fetch the `og:image` / `twitter:image`. Only a UA that runs JavaScript ever hits
-`js-ran.gif` / `module-ran.gif` or posts to `timing`.
+LinkedInBot) tend to fetch the `og:image` / `twitter:image`. Only a UA that runs JavaScript ever
+hits `js-ran.gif` / `module-ran.gif` or posts to `timing`.
 
 Each endpoint logs the hit (trace id, asset kind, UA, IP, method, full request headers, server
 timestamp) to **Deno KV**, then serves a real, valid response of the correct content-type (real
@@ -72,11 +72,11 @@ published CIDR lists daily and tags every bot hit:
 - **unverifiable** — the UA claims a bot whose operator publishes **no** ranges, so the claim can't
   be checked either way.
 
-Operators with published ranges that ua-tracer verifies against: **Googlebot, GPTBot,
-OAI-SearchBot, Bingbot, ClaudeBot / Claude-User / Claude-SearchBot** (Anthropic publishes one list
-for all three), and **Applebot**. `ChatGPT-User` publishes no ranges, so it is always
-_unverifiable_. The [`backfill-verify`](#run-locally) task retroactively re-tags historical traces
-whenever ranges are added or refreshed.
+Operators with published ranges that ua-tracer verifies against: **Googlebot, GPTBot, OAI-SearchBot,
+Bingbot, ClaudeBot / Claude-User / Claude-SearchBot** (Anthropic publishes one list for all three),
+and **Applebot**. `ChatGPT-User` publishes no ranges, so it is always _unverifiable_. The
+[`backfill-verify`](#run-locally) task retroactively re-tags historical traces whenever ranges are
+added or refreshed.
 
 ## Unsolicited & well-known requests
 
@@ -90,21 +90,21 @@ them), so they reveal which agents probe for agent-directive files — and which
 ## Pages
 
 - **`/`** — mints a fresh trace on every load, and shows the recent-requests table (newest first:
-  timestamp, User-Agent, IP, verification status, assets-fetched count, "JS ran?") plus a
-  **By user agent** leaderboard of per-UA running counts. Filter with `?ua=<substring>`.
-- **`/traces`** — the same browse view but **read-only**: it does _not_ mint a new trace or reference
-  any probe assets, so you can browse the log without adding noise. Filter with `?ua=<substring>`,
-  `?js=1` (only traces where JS ran), and `?path=<path>` (the `#unsolicited` well-known log);
-  `#by-user-agent` is the per-UA aggregate, paginated via `?uap=` / `?p=`.
+  timestamp, User-Agent, IP, verification status, assets-fetched count, "JS ran?") plus a **By user
+  agent** leaderboard of per-UA running counts. Filter with `?ua=<substring>`.
+- **`/traces`** — the same browse view but **read-only**: it does _not_ mint a new trace or
+  reference any probe assets, so you can browse the log without adding noise. Filter with
+  `?ua=<substring>`, `?js=1` (only traces where JS ran), and `?path=<path>` (the `#unsolicited`
+  well-known log); `#by-user-agent` is the per-UA aggregate, paginated via `?uap=` / `?p=`.
 - **`/trace/{id}`** — full detail for one homepage hit: a server-side waterfall of every sub-request
   in receive order (delta-ms from the homepage hit, asset kind, UA, headers), a summary of which
   asset _types_ were fetched, whether CSS-linked resources / the iframe were followed, whether
   classic JS and ES modules executed, the bot verification, and — if JS ran — the client-side
   resource-timing waterfall the page posted back.
-- **`/api/health`** — `{ "ok": true, "ts": …, "build": … }`, where `build` is the Deno Deploy
-  build id of the running revision (not the git commit sha; null off-platform). It changes on
-  every deploy, so it answers "did my landing actually go live" from outside; the build id is
-  mapped to a commit in the Deno Deploy console.
+- **`/api/health`** — `{ "ok": true, "ts": …, "build": … }`, where `build` is the Deno Deploy build
+  id of the running revision (not the git commit sha; null off-platform). It changes on every
+  deploy, so it answers "did my landing actually go live" from outside; the build id is mapped to a
+  commit in the Deno Deploy console.
 
 ## How to use it
 
@@ -158,12 +158,11 @@ deno task test:full    # every suite, plus a real headless-Chrome journey
 deno task test:file tests/http_test.ts   # one suite
 ```
 
-Both tiers include `deno task check:all`. The suites are hermetic: they run
-against an in-memory Deno KV (`tests/testenv.ts`) with no network, and the browser
-journey starts its own server in-process on 127.0.0.1. `tools/fast-gate.sh` maps a
-changed path to the suites it affects and **fails closed** — a path nobody has
-mapped exits non-zero and names the file. Budgets, the mapping table and the
-measured timings are in [docs/speed.md](docs/speed.md).
+Both tiers include `deno task check:all`. The suites are hermetic: they run against an in-memory
+Deno KV (`tests/testenv.ts`) with no network, and the browser journey starts its own server
+in-process on 127.0.0.1. `tools/fast-gate.sh` maps a changed path to the suites it affects and
+**fails closed** — a path nobody has mapped exits non-zero and names the file. Budgets, the mapping
+table and the measured timings are in [docs/speed.md](docs/speed.md).
 
 ## Deploy
 

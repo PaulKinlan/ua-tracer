@@ -603,9 +603,23 @@ async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise
   // Health check. Exempt from the canonical redirect so uptime monitors can
   // hit the deploy URL directly without chasing a 301.
   if (path === "/api/health") {
-    return new Response(JSON.stringify({ ok: true, ts: Date.now() }), {
-      headers: { "content-type": "application/json" },
-    });
+    // `build` is the revision this isolate is running, straight from the
+    // platform ("the ID of the revision that is currently running", Deno Deploy
+    // runtime env). It changes on every deploy, so a live check can tell a
+    // silent failed or lagging deploy from a live one, and can pin two checks to
+    // the same revision. It does NOT name the git commit: mapping a build id to
+    // a commit is done in the Deno Deploy console, because no deployment
+    // credentials exist on a project VM. null off-platform, where it is unset.
+    // (DENO_DEPLOYMENT_ID is deliberately not exposed: it identifies the whole
+    // configuration set rather than the revision.)
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        ts: Date.now(),
+        build: Deno.env.get("DENO_DEPLOY_BUILD_ID") ?? null,
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
   }
 
   // Canonical-domain redirect: anything arriving on the *.deno.net deploy host

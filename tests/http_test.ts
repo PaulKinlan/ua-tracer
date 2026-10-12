@@ -272,6 +272,37 @@ Deno.test("the *.deno.net deploy host 301s to uatracer.com, with /api/health exe
   if (body.ok !== true || typeof body.ts !== "number") throw new Error(JSON.stringify(body));
 });
 
+// The revision in /api/health is what lets a live check assert which deploy is
+// serving: it changes on every deploy, so "did my landing actually go live" and
+// "did this thing change between two checks" stop being unanswerable from
+// outside. It is read from the platform on each request, never cached, and the
+// environment is restored here so no other test can observe it.
+Deno.test("health reports the running revision, and null when the platform has none", async () => {
+  const previous = Deno.env.get("DENO_DEPLOY_BUILD_ID");
+  try {
+    Deno.env.set("DENO_DEPLOY_BUILD_ID", "build-test-1234");
+    const deployed = await handler(req("/api/health"));
+    if (deployed.status !== 200) throw new Error(`status ${deployed.status}`);
+    const live = await deployed.json();
+    if (live.build !== "build-test-1234") throw new Error(`build ${JSON.stringify(live)}`);
+    if (live.ok !== true || typeof live.ts !== "number") {
+      throw new Error(`health contract broke with a revision present: ${JSON.stringify(live)}`);
+    }
+
+    // Off-platform (local dev, or the gate) the variable is unset: the key stays
+    // present as null so the shape of the response never depends on the host.
+    Deno.env.delete("DENO_DEPLOY_BUILD_ID");
+    const local = await (await handler(req("/api/health"))).json();
+    if (local.build !== null) throw new Error(`build ${JSON.stringify(local)}`);
+    if (local.ok !== true || typeof local.ts !== "number") {
+      throw new Error(`health contract broke without a revision: ${JSON.stringify(local)}`);
+    }
+  } finally {
+    if (previous === undefined) Deno.env.delete("DENO_DEPLOY_BUILD_ID");
+    else Deno.env.set("DENO_DEPLOY_BUILD_ID", previous);
+  }
+});
+
 Deno.test("unsolicited well-known paths are served and logged as probes", async () => {
   await clearKv();
   const robots = await handler(req("/robots.txt"));

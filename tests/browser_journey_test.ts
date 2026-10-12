@@ -340,13 +340,36 @@ Deno.test({
         `[browser-journey] evidence: ${artifactDir}/summary.json ${JSON.stringify(evidence)}`,
       );
     } finally {
-      cdp?.close();
       if (child) {
+        // Let Chrome reap its helpers before the heavy-job slot is released.
+        // Browser.close commonly closes CDP without replying, so wait on the
+        // process exit instead of awaiting the protocol response.
+        let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-          child.kill("SIGKILL");
+          if (cdp) {
+            try {
+              void cdp.send("Browser.close").catch(() => {});
+            } catch { /* disconnected before close */ }
+          }
+          const exited = cdp && await Promise.race([
+            child.status.then(() => true),
+            new Promise<false>((resolve) => {
+              timer = setTimeout(() => resolve(false), 3000);
+            }),
+          ]);
+          if (!exited) {
+            console.warn("[browser-journey] Chrome did not close over CDP; forcing exit");
+            child.kill("SIGKILL");
+          }
           await child.status;
-        } catch { /* already gone */ }
+          if (exited) console.log("[browser-journey] Chrome closed over CDP");
+        } catch {
+          /* already gone */
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
       }
+      cdp?.close();
       await server.shutdown();
       await Deno.remove(profileDir, { recursive: true }).catch(() => {});
     }

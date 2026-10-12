@@ -13,8 +13,10 @@ import {
   traceIdFromSetCookie,
 } from "./testenv.ts";
 import {
+  boundTiming,
   handler,
   type HitRecord,
+  MAX_TIMING_ENTRIES,
   recentIndexKey,
   type TraceRecord,
   type TraceStats,
@@ -432,4 +434,112 @@ Deno.test("an unparseable timing body is ignored rather than fatal", async () =>
   if (res.status !== 200) throw new Error(`status ${res.status}`);
   const body = await res.json();
   if (body.recorded !== 0) throw new Error(JSON.stringify(body));
+});
+
+// ---- ua-tracer-0ms: the timing payload is bounded at the source ----
+// The payload is client-shaped, so its length and its fields are the client's
+// choice, and it becomes part of a KV value (cap 65536 bytes, measured). Before
+// this bound an over-cap payload made the record write throw: the probe vanished -
+// no record, no count, nothing saying so.
+
+Deno.test("boundTiming sanitises hostile entries and reports what it kept", () => {
+  const out = boundTiming([
+    {
+      name: "a.css",
+      entryType: "resource",
+      startTime: Infinity,
+      duration: NaN,
+      initiatorType: "link",
+      transferSize: -1,
+    },
+    "not an object",
+    null,
+  ]);
+  if (out.total !== 3) throw new Error(`total ${out.total}`);
+  if (out.timing.length !== 1) throw new Error(`kept ${out.timing.length}`);
+  if (out.dropped !== 2) throw new Error(`dropped ${out.dropped}`);
+  // Non-finite numbers would serialise to null and then break the waterfall's
+  // `.toFixed(0)`, so they are coerced at the boundary rather than at render time.
+  if (out.timing[0].startTime !== 0 || out.timing[0].duration !== 0) {
+    throw new Error(`non-finite survived: ${JSON.stringify(out.timing[0])}`);
+  }
+});
+
+Deno.test("a huge timing payload is truncated visibly instead of losing the probe", async () => {
+  await clearKv();
+  const { id, secret } = await mint();
+  const sent = 2000;
+  const entries = Array.from({ length: sent }, (_, i) => ({
+    name: `https://uatracer.com/r/t/x/${"p".repeat(300)}-${i}.css`,
+    entryType: "resource",
+    startTime: i * 1.5,
+    duration: 2.5,
+    initiatorType: "link",
+    transferSize: 1024,
+  }));
+  const res = await handler(
+    req(`/r/${id}/${secret}/timing`, {
+      method: "POST",
+      body: JSON.stringify({ entries }),
+    }),
+  );
+  if (res.status !== 200) throw new Error(`status ${res.status}`);
+  const body = await res.json() as { ok: boolean; recorded: number };
+  if (!body.ok) throw new Error("not ok");
+  if (body.recorded >= sent) throw new Error(`nothing was dropped: recorded ${body.recorded}`);
+  if (body.recorded > MAX_TIMING_ENTRIES) {
+    throw new Error(`recorded ${body.recorded} exceeds the entry ceiling`);
+  }
+
+  const hit = (await hitsOf(id)).find((h) => h.kind === "timing");
+  // The probe LANDED. That is the point of the whole change.
+  if (!hit) throw new Error("the timing probe was lost");
+  if (!hit.timing || hit.timing.length !== body.recorded) {
+    throw new Error(`stored ${hit.timing?.length} but the response said ${body.recorded}`);
+  }
+  if (JSON.stringify(hit).length >= 65536) {
+    throw new Error("the stored record is larger than the KV value cap");
+  }
+  const marker = hit.headers["x-timing-truncated"];
+  if (!marker) throw new Error("the truncation is not marked in the record");
+  if (!marker.includes(String(sent - body.recorded))) {
+    throw new Error(`the marker does not report the dropped count: ${marker}`);
+  }
+  // Dropped from the END: the earliest resource is the one the waterfall needs.
+  if (!hit.timing[0].name.startsWith("https://uatracer.com/r/t/x/")) {
+    throw new Error("the first entry was not preserved");
+  }
+});
+
+Deno.test("one enormous entry is shortened rather than blowing the record", async () => {
+  await clearKv();
+  const { id, secret } = await mint();
+  const res = await handler(
+    req(`/r/${id}/${secret}/timing`, {
+      method: "POST",
+      body: JSON.stringify({
+        entries: [{
+          name: `https://uatracer.com/${"n".repeat(200_000)}`,
+          entryType: "resource",
+          startTime: 1,
+          duration: 2,
+          junk: "x".repeat(100_000),
+        }],
+      }),
+    }),
+  );
+  if (res.status !== 200) throw new Error(`status ${res.status}`);
+  await res.text();
+  const hit = (await hitsOf(id)).find((h) => h.kind === "timing");
+  if (!hit?.timing?.length) throw new Error("the probe or its entries were lost");
+  if (hit.timing[0].name.length > 512) {
+    throw new Error(`name was not shortened: ${hit.timing[0].name.length}`);
+  }
+  if (!hit.headers["x-timing-truncated"]?.includes("shortened")) {
+    throw new Error(`the shortening is not reported: ${hit.headers["x-timing-truncated"]}`);
+  }
+  // The unrelated 100 KB of JSON and the 200 KB name contributed nothing.
+  if (JSON.stringify(hit).length > 4096) {
+    throw new Error(`stored record is ${JSON.stringify(hit).length} bytes`);
+  }
 });

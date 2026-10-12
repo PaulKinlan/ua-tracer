@@ -100,6 +100,95 @@ function noStore(headers: HeadersInit = {}): Headers {
   return h;
 }
 
+// --- bounding the client-supplied timing payload (ua-tracer-0ms) -----------------
+// Resource timings are attacker-shaped: the array length and every field are the
+// client's choice. They become part of a KV value, whose cap is 65536 bytes
+// (measured), so they are bounded here rather than at the write: an over-cap write
+// throws, and before this the probe was lost entirely - no record, no count, and
+// nothing saying so. Entries are dropped from the END (the earliest resources are
+// the ones the waterfall is about), every dropped/truncated entry is reported in
+// the record's headers and in a warning, and the response's `recorded` count tells
+// the client what was kept. The bounds are deliberately generous: a real browser
+// run posts ~17 entries of ~30 bytes each, which passes through untouched.
+export const MAX_TIMING_ENTRIES = 200;
+export const MAX_TIMING_BYTES = 24 * 1024;
+const MAX_TIMING_NAME_CHARS = 512;
+const MAX_TIMING_FIELD_CHARS = 64;
+
+export interface BoundedTiming {
+  timing: ResourceTiming[];
+  /** entries the client sent that are not stored (over the bound, or unusable) */
+  dropped: number;
+  /** entries the client sent */
+  total: number;
+  /** entries stored with their resource name shortened */
+  namesTruncated: number;
+}
+
+function finiteNumber(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Project one client entry onto the fields this app stores and renders. This is
+ * lossless for the real client (probes.ts posts exactly these six) and it means an
+ * entry carrying megabytes of unrelated JSON contributes nothing.
+ */
+function timingEntry(raw: unknown): { entry: ResourceTiming; truncated: boolean } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const src = raw as Record<string, unknown>;
+  const name = String(src.name ?? "");
+  const entry: ResourceTiming = {
+    name: name.slice(0, MAX_TIMING_NAME_CHARS),
+    entryType: String(src.entryType ?? "").slice(0, MAX_TIMING_FIELD_CHARS),
+    startTime: finiteNumber(src.startTime),
+    duration: finiteNumber(src.duration),
+  };
+  if (src.initiatorType != null) {
+    entry.initiatorType = String(src.initiatorType).slice(0, MAX_TIMING_FIELD_CHARS);
+  }
+  if (src.transferSize != null) entry.transferSize = finiteNumber(src.transferSize);
+  return { entry, truncated: name.length > MAX_TIMING_NAME_CHARS };
+}
+
+/** The bound in one place, so the marker, the warning and the tests agree. */
+export function boundTiming(entries: readonly unknown[]): BoundedTiming {
+  const timing: ResourceTiming[] = [];
+  let namesTruncated = 0;
+  let bytes = 0;
+  for (const raw of entries) {
+    if (timing.length >= MAX_TIMING_ENTRIES) break;
+    const parsed = timingEntry(raw);
+    if (!parsed) continue;
+    const size = JSON.stringify(parsed.entry).length;
+    if (bytes + size > MAX_TIMING_BYTES) break;
+    bytes += size;
+    if (parsed.truncated) namesTruncated++;
+    timing.push(parsed.entry);
+  }
+  return {
+    timing,
+    dropped: entries.length - timing.length,
+    total: entries.length,
+    namesTruncated,
+  };
+}
+
+/** One sentence carrying the counts, used for both the marker and the warning. */
+export function timingNote(bounded: BoundedTiming): string {
+  const parts: string[] = [];
+  if (bounded.dropped > 0) {
+    parts.push(`dropped ${bounded.dropped} of ${bounded.total} resource timings`);
+  }
+  if (bounded.namesTruncated > 0) {
+    parts.push(`shortened ${bounded.namesTruncated} resource name(s)`);
+  }
+  return `${
+    parts.join("; ")
+  } (kept ${bounded.timing.length}; budget ${MAX_TIMING_BYTES} bytes / ${MAX_TIMING_ENTRIES} entries)`;
+}
+
 async function handleAsset(
   req: Request,
   id: string,
@@ -135,14 +224,27 @@ async function handleAsset(
     return new Response("Not found", { status: 404 });
   }
 
-  // For /timing we read the POST body (resource timing) before logging.
+  // For /timing we read the POST body (resource timing) before logging. The
+  // payload is client-supplied and becomes part of a KV value (cap 64 KiB,
+  // measured 65536 bytes), so it is bounded HERE, at the source: before
+  // ua-tracer-0ms an over-cap payload made the record write throw, which lost the
+  // whole probe - no record, no count, and nothing anywhere saying so.
   let timing: ResourceTiming[] | undefined;
   if (asset === "timing" && req.method === "POST") {
     try {
       const text = await req.text();
       if (text) {
         const parsed = JSON.parse(text);
-        if (Array.isArray(parsed?.entries)) timing = parsed.entries;
+        if (Array.isArray(parsed?.entries)) {
+          const bounded = boundTiming(parsed.entries);
+          timing = bounded.timing;
+          if (bounded.dropped > 0 || bounded.namesTruncated > 0) {
+            // Visible in the trace itself, not only in a log nobody reads: the
+            // marker rides in the hit record's headers, which the trace view shows.
+            headers["x-timing-truncated"] = timingNote(bounded);
+            console.warn(`[timing] trace=${id} ${timingNote(bounded)}`);
+          }
+        }
       }
     } catch (_e) {
       // ignore malformed payloads

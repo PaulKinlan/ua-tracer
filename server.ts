@@ -100,6 +100,72 @@ function noStore(headers: HeadersInit = {}): Headers {
   return h;
 }
 
+// --- bounding the probe REQUEST BODY (ua-tracer-0ms, narrowed scope) -------------
+// Reading is the FIRST unbounded step: `await req.text()` holds the whole POST in
+// memory before any bound can be applied to it, so one large post is absorbed at full
+// size even though the record it produces is tiny. The bound therefore belongs at the
+// read: a declared length over the limit is refused before the body is touched, and a
+// body that exceeds it while streaming is abandoned mid-read.
+//
+// The limit must sit BELOW the stored-value cap (65536 bytes, measured), because a
+// body this app accepts becomes a KV value: a limit above the value cap would let a
+// perfectly "accepted" body produce a record the KV cannot store, which is the failure
+// that loses the probe. 32 KiB leaves room for the record's headers and UA while being
+// generous for the real thing - a browser's resource-timing post is ~17 entries, about
+// 1 KiB.
+//
+// A refused body still leaves its probe in the trace, marked as refused. Losing the
+// evidence is the failure this whole area exists to prevent, so an over-limit post
+// costs the payload, never the fact that the probe happened.
+export const MAX_PROBE_BODY_BYTES = 32 * 1024;
+
+/** Read a request body, refusing anything over `limit`. `null` means refused, not empty. */
+export async function readBoundedBody(
+  req: Request,
+  limit = MAX_PROBE_BODY_BYTES,
+): Promise<string | null> {
+  const declared = Number(req.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) return null;
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // already released by cancel()
+    }
+  }
+  const joined = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
+
+/** What an over-limit probe body gets, instead of being absorbed. */
+export function payloadTooLarge(limit = MAX_PROBE_BODY_BYTES): Response {
+  return new Response(
+    JSON.stringify({ ok: false, error: "payload too large", limit }),
+    { status: 413, headers: noStore({ "content-type": "application/json" }) },
+  );
+}
+
 // --- bounding the client-supplied timing payload (ua-tracer-0ms) -----------------
 // Resource timings are attacker-shaped: the array length and every field are the
 // client's choice. They become part of a KV value, whose cap is 65536 bytes
@@ -224,16 +290,28 @@ async function handleAsset(
     return new Response("Not found", { status: 404 });
   }
 
-  // For /timing we read the POST body (resource timing) before logging. The
-  // payload is client-supplied and becomes part of a KV value (cap 64 KiB,
-  // measured 65536 bytes), so it is bounded HERE, at the source: before
-  // ua-tracer-0ms an over-cap payload made the record write throw, which lost the
-  // whole probe - no record, no count, and nothing anywhere saying so.
+  // For /timing we read the POST body (resource timing) before logging. TWO bounds
+  // apply, in this order (ua-tracer-0ms):
+  //  - the READ is bounded, so an over-limit body is refused with a 4xx instead of being
+  //    absorbed; the probe is still recorded below, marked as refused; and
+  //  - the payload that does get read is bounded again before it is STORED, so a body
+  //    this app accepted cannot become a record the KV cannot hold - entries are dropped
+  //    from the end and reported in x-timing-truncated.
+  // Either way the probe is recorded: an over-limit post costs the payload, never the
+  // fact that the probe happened.
   let timing: ResourceTiming[] | undefined;
+  let timingBodyRefused = false;
   if (asset === "timing" && req.method === "POST") {
     try {
-      const text = await req.text();
-      if (text) {
+      const text = await readBoundedBody(req);
+      if (text === null) {
+        timingBodyRefused = true;
+        headers["x-timing-rejected"] =
+          `request body over ${MAX_PROBE_BODY_BYTES} bytes - not read, timing payload dropped`;
+        console.warn(
+          `[timing] trace=${id} refused a request body over ${MAX_PROBE_BODY_BYTES} bytes`,
+        );
+      } else if (text) {
         const parsed = JSON.parse(text);
         if (Array.isArray(parsed?.entries)) {
           const bounded = boundTiming(parsed.entries);
@@ -252,11 +330,21 @@ async function handleAsset(
   }
 
   // CSP / Reporting-API endpoints: capture the posted report body so it shows
-  // up in the trace (stored in the hit headers under a synthetic key).
+  // up in the trace (stored in the hit headers under a synthetic key). Bounded for
+  // the same reason as /timing, and refused bodies are still recorded.
+  let reportBodyRefused = false;
   if ((asset === "csp-report" || asset === "report") && req.method === "POST") {
     try {
-      const text = await req.text();
-      if (text) headers["x-report-body"] = text.slice(0, 4000);
+      const text = await readBoundedBody(req);
+      if (text === null) {
+        reportBodyRefused = true;
+        headers["x-report-rejected"] = `request body over ${MAX_PROBE_BODY_BYTES} bytes - not read`;
+        console.warn(
+          `[report] trace=${id} refused a request body over ${MAX_PROBE_BODY_BYTES} bytes`,
+        );
+      } else if (text) {
+        headers["x-report-body"] = text.slice(0, 4000);
+      }
     } catch (_e) { /* ignore */ }
   }
 
@@ -333,6 +421,7 @@ async function handleAsset(
         headers: noStore({ "content-type": "text/javascript; charset=utf-8" }),
       });
     case "timing":
+      if (timingBodyRefused) return payloadTooLarge();
       return new Response(JSON.stringify({ ok: true, recorded: timing?.length ?? 0 }), {
         headers: noStore({ "content-type": "application/json" }),
       });
@@ -359,7 +448,10 @@ async function handleAsset(
     case "csp-report":
     case "report":
       // CSP / Reporting-API endpoints. The posted report body was captured above
-      // (x-report-body header) for display in the trace. Just acknowledge.
+      // (x-report-body header) for display in the trace. An over-limit body is
+      // refused with a 4xx instead of being absorbed - but the hit is already
+      // logged above, so the trace still shows the probe happened.
+      if (reportBodyRefused) return payloadTooLarge();
       return new Response(null, { status: 204, headers: noStore() });
     default:
       return new Response("Not found", { status: 404 });

@@ -16,7 +16,9 @@ import {
   boundTiming,
   handler,
   type HitRecord,
+  MAX_PROBE_BODY_BYTES,
   MAX_TIMING_ENTRIES,
+  readBoundedBody,
   recentIndexKey,
   type TraceRecord,
   type TraceStats,
@@ -465,69 +467,68 @@ Deno.test("boundTiming sanitises hostile entries and reports what it kept", () =
   }
 });
 
-Deno.test("a huge timing payload is truncated visibly instead of losing the probe", async () => {
+Deno.test("too many entries in an accepted body are truncated visibly", async () => {
   await clearKv();
   const { id, secret } = await mint();
-  const sent = 2000;
+  // Under the READ limit (MAX_PROBE_BODY_BYTES) and small in bytes, so it is accepted,
+  // but over the entry ceiling: this is the case the payload-shape bound exists for.
+  // A body over the read limit never reaches this code - it gets a 413 (see the
+  // request-body tests below), which is the interaction between the two bounds.
+  const sent = 240;
   const entries = Array.from({ length: sent }, (_, i) => ({
-    name: `https://uatracer.com/r/t/x/${"p".repeat(300)}-${i}.css`,
+    name: `r${i}.css`,
     entryType: "resource",
-    startTime: i * 1.5,
-    duration: 2.5,
-    initiatorType: "link",
-    transferSize: 1024,
+    startTime: i,
+    duration: 2,
   }));
+  const body = JSON.stringify({ entries });
+  if (body.length > MAX_PROBE_BODY_BYTES) {
+    throw new Error(`this test must stay inside the read limit: ${body.length} bytes`);
+  }
   const res = await handler(
-    req(`/r/${id}/${secret}/timing`, {
-      method: "POST",
-      body: JSON.stringify({ entries }),
-    }),
+    req(`/r/${id}/${secret}/timing`, { method: "POST", body }),
   );
   if (res.status !== 200) throw new Error(`status ${res.status}`);
-  const body = await res.json() as { ok: boolean; recorded: number };
-  if (!body.ok) throw new Error("not ok");
-  if (body.recorded >= sent) throw new Error(`nothing was dropped: recorded ${body.recorded}`);
-  if (body.recorded > MAX_TIMING_ENTRIES) {
-    throw new Error(`recorded ${body.recorded} exceeds the entry ceiling`);
+  const parsed = await res.json() as { ok: boolean; recorded: number };
+  if (!parsed.ok) throw new Error("not ok");
+  if (parsed.recorded !== MAX_TIMING_ENTRIES) {
+    throw new Error(`kept ${parsed.recorded}, expected the ceiling ${MAX_TIMING_ENTRIES}`);
   }
 
   const hit = (await hitsOf(id)).find((h) => h.kind === "timing");
-  // The probe LANDED. That is the point of the whole change.
-  if (!hit) throw new Error("the timing probe was lost");
-  if (!hit.timing || hit.timing.length !== body.recorded) {
-    throw new Error(`stored ${hit.timing?.length} but the response said ${body.recorded}`);
+  // The probe LANDED, and the surplus is reported rather than hidden.
+  if (!hit?.timing || hit.timing.length !== parsed.recorded) {
+    throw new Error(`stored ${hit?.timing?.length} but the response said ${parsed.recorded}`);
   }
   if (JSON.stringify(hit).length >= 65536) {
     throw new Error("the stored record is larger than the KV value cap");
   }
   const marker = hit.headers["x-timing-truncated"];
   if (!marker) throw new Error("the truncation is not marked in the record");
-  if (!marker.includes(String(sent - body.recorded))) {
+  if (!marker.includes(String(sent - parsed.recorded))) {
     throw new Error(`the marker does not report the dropped count: ${marker}`);
   }
-  // Dropped from the END: the earliest resource is the one the waterfall needs.
-  if (!hit.timing[0].name.startsWith("https://uatracer.com/r/t/x/")) {
-    throw new Error("the first entry was not preserved");
-  }
+  // Dropped from the END: the earliest resources are the ones the waterfall needs.
+  if (hit.timing[0].name !== "r0.css") throw new Error("the first entry was not preserved");
 });
 
-Deno.test("one enormous entry is shortened rather than blowing the record", async () => {
+Deno.test("an over-long resource name is shortened rather than blowing up the record", async () => {
   await clearKv();
   const { id, secret } = await mint();
-  const res = await handler(
-    req(`/r/${id}/${secret}/timing`, {
-      method: "POST",
-      body: JSON.stringify({
-        entries: [{
-          name: `https://uatracer.com/${"n".repeat(200_000)}`,
-          entryType: "resource",
-          startTime: 1,
-          duration: 2,
-          junk: "x".repeat(100_000),
-        }],
-      }),
-    }),
-  );
+  const longName = `https://uatracer.com/${"n".repeat(4000)}`;
+  const body = JSON.stringify({
+    entries: [{
+      name: longName,
+      entryType: "resource",
+      startTime: 1,
+      duration: 2,
+      junk: "x".repeat(2000),
+    }],
+  });
+  if (body.length > MAX_PROBE_BODY_BYTES) {
+    throw new Error(`this test must stay inside the read limit: ${body.length} bytes`);
+  }
+  const res = await handler(req(`/r/${id}/${secret}/timing`, { method: "POST", body }));
   if (res.status !== 200) throw new Error(`status ${res.status}`);
   await res.text();
   const hit = (await hitsOf(id)).find((h) => h.kind === "timing");
@@ -538,8 +539,95 @@ Deno.test("one enormous entry is shortened rather than blowing the record", asyn
   if (!hit.headers["x-timing-truncated"]?.includes("shortened")) {
     throw new Error(`the shortening is not reported: ${hit.headers["x-timing-truncated"]}`);
   }
-  // The unrelated 100 KB of JSON and the 200 KB name contributed nothing.
-  if (JSON.stringify(hit).length > 4096) {
-    throw new Error(`stored record is ${JSON.stringify(hit).length} bytes`);
+  // The unrelated 2 KB of JSON contributed nothing to the stored record.
+  if (JSON.stringify(hit).includes("x".repeat(2000))) {
+    throw new Error("an unknown field was stored");
   }
+});
+Deno.test("readBoundedBody reads within the limit and refuses past it", async () => {
+  const small = new Request("http://x/timing", { method: "POST", body: "hello" });
+  if (await readBoundedBody(small) !== "hello") throw new Error("small body not read");
+
+  // A declared length over the limit is refused before the body is touched at all.
+  const declared = new Request("http://x/timing", {
+    method: "POST",
+    headers: { "content-length": String(MAX_PROBE_BODY_BYTES + 1) },
+    body: "small",
+  });
+  if (await readBoundedBody(declared) !== null) {
+    throw new Error("a declared over-limit body was read anyway");
+  }
+
+  // Streamed, so the reader has to abandon it mid-body rather than buffer it all.
+  const big = new Request("http://x/timing", {
+    method: "POST",
+    body: "x".repeat(MAX_PROBE_BODY_BYTES * 2),
+  });
+  if (await readBoundedBody(big) !== null) throw new Error("over-limit body was accepted");
+});
+
+Deno.test("an over-limit timing body is refused, and the trace still shows the probe", async () => {
+  await clearKv();
+  const { id, secret } = await mint();
+  const res = await handler(
+    req(`/r/${id}/${secret}/timing`, {
+      method: "POST",
+      body: JSON.stringify({ entries: [{ name: "x".repeat(MAX_PROBE_BODY_BYTES * 2) }] }),
+    }),
+  );
+  if (res.status !== 413) throw new Error(`expected 413, got ${res.status}`);
+  const body = await res.json() as { ok: boolean; error: string; limit: number };
+  if (body.ok || body.error !== "payload too large") {
+    throw new Error(`body ${JSON.stringify(body)}`);
+  }
+  if (body.limit !== MAX_PROBE_BODY_BYTES) throw new Error(`limit ${body.limit}`);
+
+  const hit = (await hitsOf(id)).find((h) => h.kind === "timing");
+  // The payload is refused; the PROBE is not lost. That ordering is the point.
+  if (!hit) throw new Error("the probe was lost with the payload");
+  if (hit.timing?.length) throw new Error("the over-limit payload was absorbed anyway");
+  if (!hit.headers["x-timing-rejected"]?.includes(String(MAX_PROBE_BODY_BYTES))) {
+    throw new Error(`refusal not marked: ${hit.headers["x-timing-rejected"]}`);
+  }
+});
+
+Deno.test("an over-limit report body is refused with a 4xx and still logged", async () => {
+  for (const asset of ["csp-report", "report"]) {
+    await clearKv();
+    const { id, secret } = await mint();
+    const res = await handler(
+      req(`/r/${id}/${secret}/${asset}`, {
+        method: "POST",
+        body: JSON.stringify({
+          "csp-report": { "blocked-uri": "y".repeat(MAX_PROBE_BODY_BYTES * 2) },
+        }),
+      }),
+    );
+    if (res.status !== 413) throw new Error(`${asset} -> ${res.status}`);
+    await res.text();
+    const hit = (await hitsOf(id)).find((h) => h.kind === asset);
+    if (!hit) throw new Error(`${asset} probe not logged`);
+    if (!hit.headers["x-report-rejected"]) throw new Error(`${asset} refusal not marked`);
+    if (hit.headers["x-report-body"]) throw new Error(`${asset} over-limit body was stored`);
+  }
+});
+
+Deno.test("a within-limit probe body is unaffected", async () => {
+  await clearKv();
+  const { id, secret } = await mint();
+  const entries = [{
+    name: "https://uatracer.com/a.css",
+    entryType: "resource",
+    startTime: 1,
+    duration: 2,
+  }];
+  const res = await handler(
+    req(`/r/${id}/${secret}/timing`, { method: "POST", body: JSON.stringify({ entries }) }),
+  );
+  if (res.status !== 200) throw new Error(`status ${res.status}`);
+  const body = await res.json() as { recorded: number };
+  if (body.recorded !== 1) throw new Error(`recorded ${body.recorded}`);
+  const hit = (await hitsOf(id)).find((h) => h.kind === "timing");
+  if (hit?.timing?.length !== 1) throw new Error("a normal payload did not round-trip");
+  if (hit.headers["x-timing-rejected"]) throw new Error("a normal payload was marked refused");
 });

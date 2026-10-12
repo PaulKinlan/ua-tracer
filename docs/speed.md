@@ -1,6 +1,6 @@
 # Gate speed budget
 
-ua-tracer is a single-file Deno app (`server.ts`, ~2.7k lines) with no build step,
+ua-tracer is a Deno app with a thin `server.ts` entrypoint and separate storage, bot, probe, and view contracts; it has no build step,
 so the gate is `deno fmt` + `deno lint` + `deno check` + `deno test`. This file is
 the contract for how long each tier may take and which suite a change must run.
 
@@ -10,11 +10,11 @@ the contract for how long each tier may take and which suite a change must run.
 | --- | --- | --- | --- |
 | Fast | `deno task test:fast` | **<= 60 s** (fleet R2) | ~7 s end to end (code-only delta: ~3 s) |
 | Full | `deno task test:full` | **<= 300 s** (fleet R1) | ~7 s end to end |
-| Changed file only | `deno task test:file tests/<suite>.ts` | — | ~1.3 s for all seven code suites |
+| Changed file only | `deno task test:file tests/<suite>.ts` | — | ~1.3 s for the original seven code suites (re-measure after split) |
 
 Composition of the measured fast run: `check:all` (fmt + lint + typecheck) ~0.2 s
 with a warm typecheck cache (~5 s cold, i.e. the first run after a Deno upgrade),
-the mapping guard ~0.9 s, the seven code suites ~1.3 s, and the browser journey
+the mapping guard ~0.9 s, the original seven code suites ~1.3 s, and the browser journey
 ~3.6 s when — and only when — the delta touches it.
 
 Both tiers include `deno task check:all` (fmt + lint + typecheck). The full tier
@@ -64,7 +64,9 @@ is queued (one heavy slot per VM).
 | --- | --- |
 | `tests/unit_format_test.ts` | `escapeHtml`, `fmtTs`, `fmtDelta`, `clientIp`, `ipv4ToInt`, `cidrContains4`, `uaHeadline` |
 | `tests/unit_keys_test.ts` | KV index-key shapes and the newest-first ordering the browse pages assume |
-| `tests/unit_bot_test.ts` | `classifyBot`: verified / unverified / unverifiable / null, case-insensitivity, IPv4-mapped IPs, fail-closed on an unseeded range source |
+| `tests/unit_bot_test.ts` | `classifyBot`: verified / unverified / unverifiable / null, case-insensitivity, IPv4-mapped IPs, fail-closed on an unseeded range source, injected dependencies |
+| `tests/unit_views_test.ts` | pure homepage and trace detail renderers: secret probe paths, canonical URL, escaping, timing waterfall |
+| `tests/unit_probes_test.ts` | legacy/secret URLs, path-to-hit kinds and generated nested probe references |
 | `tests/kv_behaviour_test.ts` | the denormalised KV write path: concurrent sub-request folding (CAS), per-UA aggregate, unknown-trace probes |
 | `tests/backfill_test.ts` | the recent-index legacy schema: rebuild, upgrade in place, idempotency, dangling entries |
 | `tests/backfill_verified_test.ts` | re-tagging traces with the IP-range verdict and mirroring it into both snapshots |
@@ -80,12 +82,16 @@ prints the mapping; `--dry-run` prints the resolved set):
 
 | Changed path | Suites |
 | --- | --- |
-| `server.ts`, `tests/testenv.ts` | every non-browser suite (routing, KV schema and the whole write path live in the entrypoint; the browser journey stays the full gate's job so Chrome is not in every fast run) |
+| `server.ts`, `tests/testenv.ts` | every non-browser suite (entrypoint wiring and shared test environment) |
+| `storage.ts` | `unit_keys_test`, `kv_behaviour_test`, `backfill_test`, `backfill_verified_test`, `http_test` |
+| `bot-verification.ts` | `unit_bot_test`, `unit_format_test`, `backfill_verified_test`, `http_test` |
+| `probes.ts` | `unit_probes_test`, `http_test`, `kv_behaviour_test` (browser journey remains full-only) |
+| `views.ts` | `unit_views_test`, `unit_format_test`, `http_test` |
 | `backfill.ts` | `backfill_test` |
 | `backfill-verified.ts` | `backfill_verified_test`, `unit_bot_test` |
 | `tests/<suite>.ts` | that suite, including the browser suite: a change to it is exactly when a browser run is worth paying for |
 | `tests/browser_journey_test.ts` | that suite, run as `deno task test:browser` (~3.6 s) |
-| `deno.json`, `tools/*`, `README.md`, `docs/*`, `LICENSE`, `.gitignore` | `gate_mapping_test` (the bounded subset that proves the dispatcher still maps; both guard suites run on every invocation anyway) |
+| `deno.json`, `tools/*`, `README.md`, `AGENTS.md`, `docs/*`, `LICENSE`, `.gitignore` | `gate_mapping_test` (the bounded subset that proves the dispatcher still maps; both guard suites run on every invocation anyway) |
 | anything else | **fails closed (exit 2)**, naming the file |
 
 An empty delta runs every suite: "nothing changed" must never mean "nothing

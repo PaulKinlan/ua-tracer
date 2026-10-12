@@ -27,7 +27,7 @@ import {
   uaAggKey,
   type UaAggregate,
   uaIndexKey,
-} from "./server.ts";
+} from "./storage.ts";
 
 // Rebuild a TraceStats from the source-of-truth records, used for legacy
 // recent-index entries that only hold a bare trace id. Mirrors the seeding in

@@ -45,6 +45,8 @@ FAST_SUITES=(
   tests/unit_format_test.ts
   tests/unit_keys_test.ts
   tests/unit_bot_test.ts
+  tests/unit_views_test.ts
+  tests/unit_probes_test.ts
   tests/kv_behaviour_test.ts
   tests/backfill_test.ts
   tests/backfill_verified_test.ts
@@ -99,12 +101,22 @@ is_always_suite() {
 map_one() {
   local f="$1"
   case "$f" in
-    # The entrypoint holds routing, the KV schema and the whole KV write path, so
-    # every non-browser suite is affected. `tests/testenv.ts` is shared by all.
-    # The browser journey is deliberately not selected here: it is the full
-    # gate's job, and selecting it would put Chrome in every fast run.
+    # The entrypoint wires every contract; testenv is shared by all suites.
+    # Browser journeys remain in the full gate unless their own file changes.
     server.ts | tests/testenv.ts)
       printf '%s\n' "${FAST_SUITES[@]}"
+      ;;
+    storage.ts)
+      printf '%s\n' tests/unit_keys_test.ts tests/kv_behaviour_test.ts tests/backfill_test.ts tests/backfill_verified_test.ts tests/http_test.ts
+      ;;
+    bot-verification.ts)
+      printf '%s\n' tests/unit_bot_test.ts tests/unit_format_test.ts tests/backfill_verified_test.ts tests/http_test.ts
+      ;;
+    probes.ts)
+      printf '%s\n' tests/unit_probes_test.ts tests/http_test.ts tests/kv_behaviour_test.ts
+      ;;
+    views.ts)
+      printf '%s\n' tests/unit_views_test.ts tests/unit_format_test.ts tests/http_test.ts
       ;;
     backfill.ts)
       printf '%s\n' tests/backfill_test.ts
@@ -123,7 +135,7 @@ map_one() {
     # this gate: the mapping guard is the bounded subset that proves the dispatcher
     # still maps and still fails closed (and the config guard runs on every
     # invocation regardless).
-    deno.json | .gitignore | LICENSE | README.md | docs/* | tools/*)
+    deno.json | .gitignore | LICENSE | README.md | AGENTS.md | docs/* | tools/*)
       printf '%s\n' tests/gate_mapping_test.ts
       ;;
     *)

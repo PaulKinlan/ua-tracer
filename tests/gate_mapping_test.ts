@@ -103,6 +103,32 @@ Deno.test("a storage/entrypoint change runs the HTTP and KV integration suites",
   }
 });
 
+Deno.test("extracted contracts map only to affected fast suites", async () => {
+  const expected: Record<string, string[]> = {
+    "storage.ts": [
+      "tests/unit_keys_test.ts",
+      "tests/kv_behaviour_test.ts",
+      "tests/backfill_test.ts",
+      "tests/backfill_verified_test.ts",
+      "tests/http_test.ts",
+    ],
+    "bot-verification.ts": [
+      "tests/unit_bot_test.ts",
+      "tests/unit_format_test.ts",
+      "tests/backfill_verified_test.ts",
+      "tests/http_test.ts",
+    ],
+    "probes.ts": ["tests/unit_probes_test.ts", "tests/http_test.ts", "tests/kv_behaviour_test.ts"],
+    "views.ts": ["tests/unit_views_test.ts", "tests/unit_format_test.ts", "tests/http_test.ts"],
+  };
+  for (const [path, selected] of Object.entries(expected)) {
+    const got = await suites(["--map", path]);
+    if ([...got].sort().join() !== [...selected].sort().join()) {
+      throw new Error(`${path}: ${got.join()} != ${selected.join()}`);
+    }
+  }
+});
+
 Deno.test("a changed suite runs itself, and shared test code runs everything", async () => {
   if ((await suites(["--map", "tests/http_test.ts"])).join() !== "tests/http_test.ts") {
     throw new Error("a changed suite must map to itself");
@@ -140,7 +166,17 @@ Deno.test("a real delta resolves through git diff, not just --map", async () => 
     // A changed tracked file must resolve too, and via its mapping arm rather than
     // its own name (server.ts -> the whole fast set).
     const serverMap = await suites(["--map", "server.ts"]);
-    if (serverMap.length !== 7) throw new Error(`server.ts maps to ${serverMap.length} suites`);
+    const fast = (await suites(["--all-suites", "--dry-run"]))
+      .filter((suite) =>
+        ![
+          "tests/browser_journey_test.ts",
+          "tests/gate_config_test.ts",
+          "tests/gate_mapping_test.ts",
+        ].includes(suite)
+      );
+    if ([...serverMap].sort().join() !== [...fast].sort().join()) {
+      throw new Error(`server.ts maps to ${serverMap.join()}, expected ${fast.join()}`);
+    }
   } finally {
     await Deno.remove(probe).catch(() => {});
   }
@@ -153,6 +189,7 @@ Deno.test("config, tooling and docs map to the bounded mapping subset", async ()
       "tools/fast-gate.sh",
       "tools/full-gate.sh",
       "README.md",
+      "AGENTS.md",
       "docs/speed.md",
     ]
   ) {

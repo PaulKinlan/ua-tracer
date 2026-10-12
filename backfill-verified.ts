@@ -12,15 +12,8 @@
 // tests can drive it against an isolated KV; `import.meta.main` keeps importing
 // this file side-effect free.
 
-import {
-  type BotVerification,
-  classifyBot,
-  getKv,
-  recentIndexKey,
-  type TraceRecord,
-  type TraceStats,
-  uaIndexKey,
-} from "./server.ts";
+import { getKv, recentIndexKey, type TraceRecord, type TraceStats, uaIndexKey } from "./storage.ts";
+import { type BotVerification, classifyBot } from "./bot-verification.ts";
 
 export interface BackfillVerifiedResult {
   scanned: number;

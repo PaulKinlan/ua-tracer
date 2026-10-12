@@ -14,39 +14,39 @@ Live at uatracer.com, Deno Deploy, state in Deno KV.
 The **entrypoint is `server.ts`** (exported `handler`; Deno Deploy runs it as a dynamic runtime). It
 owns the route table, the HTTP semantics (canonical redirect, HEAD, security headers), the periodic
 refresh and `Deno.serve` under `import.meta.main`. The request-time work behind it is split by
-responsibility, and which top-level modules exist is whatever `git ls-files '*.ts'` says — at the time
-of writing that is the table below. **Every one of them must appear in `map_one()` in
-`tools/fast-gate.sh`**; do not mirror the tree in this file, because a refactor moves modules and must
-update the map rather than silently making this page false.
+responsibility, and which top-level modules exist is whatever `git ls-files '*.ts'` says — at the
+time of writing that is the table below. **Every one of them must appear in `map_one()` in
+`tools/fast-gate.sh`**; do not mirror the tree in this file, because a refactor moves modules and
+must update the map rather than silently making this page false.
 
-| Path | What it is |
-| --- | --- |
-| `server.ts` | The entrypoint: routing, request/response semantics, the probe-hit write path, `handler`, `Deno.serve`. |
-| `storage.ts` | The stable KV schema and trace/probe persistence (key builders, `getKv()`, `casRetry`, listing). No HTTP entrypoint imports. |
-| `bot-verification.ts` | Published bot CIDR verification and the `verified` / `unverified` / `unverifiable` verdict; range fetch + cache. |
-| `probes.ts` | The probe URL contract and the generated resource bodies (CSS/JS/PNG/GIF/woff2/manifest/iframe). |
-| `views.ts` | Pure HTML rendering for the pages; storage and network access belong to the entrypoint. |
+| Path                                  | What it is                                                                                                                          |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `server.ts`                           | The entrypoint: routing, request/response semantics, the probe-hit write path, `handler`, `Deno.serve`.                             |
+| `storage.ts`                          | The stable KV schema and trace/probe persistence (key builders, `getKv()`, `casRetry`, listing). No HTTP entrypoint imports.        |
+| `bot-verification.ts`                 | Published bot CIDR verification and the `verified` / `unverified` / `unverifiable` verdict; range fetch + cache.                    |
+| `probes.ts`                           | The probe URL contract and the generated resource bodies (CSS/JS/PNG/GIF/woff2/manifest/iframe).                                    |
+| `views.ts`                            | Pure HTML rendering for the pages; storage and network access belong to the entrypoint.                                             |
 | `backfill.ts`, `backfill-verified.ts` | One-off maintenance over stored traces (`deno task backfill`, `backfill-verify`); both importable, bodies under `import.meta.main`. |
-| `tools/fast-gate.sh` | The affected-path dispatcher. **The only place the path→suite map exists.** |
-| `tools/full-gate.sh` | Thin wrapper: `fast-gate.sh --all-suites`. |
-| `tools/check.conf` | Tracked gate commands + budgets (source of truth for the VM config). |
-| `tools/check-cmd.sh` | Prints the resolved gate values; `--install` writes `~/.fleet/check.conf`. |
-| `tests/` | The suites, plus `tests/testenv.ts` (redirects `Deno.openKv` to `:memory:`). |
-| `docs/speed.md` | Budgets, mapping table, hermeticity rules, measured timings. |
-| `artifacts/` | Gitignored browser-journey output (screenshot, `summary.json`, Chrome profile). |
-| `AGENTS.md` | This file — the durable rules, not a mirror of the tree. |
+| `tools/fast-gate.sh`                  | The affected-path dispatcher. **The only place the path→suite map exists.**                                                         |
+| `tools/full-gate.sh`                  | Thin wrapper: `fast-gate.sh --all-suites`.                                                                                          |
+| `tools/check.conf`                    | Tracked gate commands + budgets (source of truth for the VM config).                                                                |
+| `tools/check-cmd.sh`                  | Prints the resolved gate values; `--install` writes `~/.fleet/check.conf`.                                                          |
+| `tests/`                              | The suites, plus `tests/testenv.ts` (redirects `Deno.openKv` to `:memory:`).                                                        |
+| `docs/speed.md`                       | Budgets, mapping table, hermeticity rules, measured timings.                                                                        |
+| `artifacts/`                          | Gitignored browser-journey output (screenshot, `summary.json`, Chrome profile).                                                     |
+| `AGENTS.md`                           | This file — the durable rules, not a mirror of the tree.                                                                            |
 
 ## The gate
 
-| Tier | Command | Budget | Who runs it |
-| --- | --- | --- | --- |
-| Fast | `deno task check:fast` (= `test:fast`) | fleet R2, 60 s; measured ~3–7 s | Every lane, on every change, before hand-off (`fleet-check --fast`). |
-| Full | `deno task check` (= `test:full`) | fleet R1, 300 s; measured ~8 s warm, ~15 s cold (the browser journey is 4–6 s of it) | **The merger only**, once per landing on the merged union (`fleet-check --full` if you are landing). |
-| One suite | `deno task test:file tests/http_test.ts` | — | While iterating. |
-| Guards only | `deno task test:guards` | — | When you touch the gate, the config or this file. |
+| Tier        | Command                                  | Budget                                                                               | Who runs it                                                                                          |
+| ----------- | ---------------------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| Fast        | `deno task check:fast` (= `test:fast`)   | fleet R2, 60 s; measured ~3–7 s                                                      | Every lane, on every change, before hand-off (`fleet-check --fast`).                                 |
+| Full        | `deno task check` (= `test:full`)        | fleet R1, 300 s; measured ~8 s warm, ~15 s cold (the browser journey is 4–6 s of it) | **The merger only**, once per landing on the merged union (`fleet-check --full` if you are landing). |
+| One suite   | `deno task test:file tests/http_test.ts` | —                                                                                    | While iterating.                                                                                     |
+| Guards only | `deno task test:guards`                  | —                                                                                    | When you touch the gate, the config or this file.                                                    |
 
-`deno task check:all` (fmt `--check`, lint, `deno check`) is included in both tiers. The tiers run 80
-tests: 17 gate guards, 62 code, 1 real-browser journey across 12 suites plus `tests/testenv.ts`.
+`deno task check:all` (fmt `--check`, lint, `deno check`) is included in both tiers. The tiers run
+80 tests: 17 gate guards, 62 code, 1 real-browser journey across 12 suites plus `tests/testenv.ts`.
 
 `fleet-check` refuses the full gate from a non-merger lane in its own words ("the FULL gate is the
 merger's job, not a lane's"), because every non-merger full run costs the VM's single heavy slot a
@@ -67,23 +67,23 @@ naming every unmapped path) on a path it does not know. So:
 
 > **A new top-level module, config file or directory must be added to `map_one()` in
 > `tools/fast-gate.sh` in the same commit that introduces it.** Until it is, the gate refuses
-> *every* lane's branch, not just yours.
+> _every_ lane's branch, not just yours.
 
 The authoritative map is `map_one()` in `tools/fast-gate.sh`; the table below and the one in
 `docs/speed.md` are copies for readers, so a change to the map is a change to all three.
 
-| Changed path | Suites |
-| --- | --- |
-| `server.ts`, `tests/testenv.ts` | every non-browser suite |
-| `storage.ts` (KV schema) | `unit_keys`, `kv_behaviour`, `backfill`, `backfill_verified`, `http` |
-| `bot-verification.ts` | `unit_bot`, `unit_format`, `backfill_verified`, `http` |
-| `probes.ts` | `unit_probes`, `http`, `kv_behaviour` |
-| `views.ts` | `unit_views`, `unit_format`, `http` |
-| `backfill.ts` | `backfill_test` |
-| `backfill-verified.ts` | `backfill_verified_test`, `unit_bot_test` |
-| `tests/<suite>.ts` | that suite (a changed browser suite runs the browser journey) |
-| `deno.json`, `.gitignore`, `LICENSE`, `README.md`, `AGENTS.md`, `docs/*`, `tools/*` | `gate_mapping_test` |
-| anything else | **exit 2, fail closed** |
+| Changed path                                                                        | Suites                                                               |
+| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `server.ts`, `tests/testenv.ts`                                                     | every non-browser suite                                              |
+| `storage.ts` (KV schema)                                                            | `unit_keys`, `kv_behaviour`, `backfill`, `backfill_verified`, `http` |
+| `bot-verification.ts`                                                               | `unit_bot`, `unit_format`, `backfill_verified`, `http`               |
+| `probes.ts`                                                                         | `unit_probes`, `http`, `kv_behaviour`                                |
+| `views.ts`                                                                          | `unit_views`, `unit_format`, `http`                                  |
+| `backfill.ts`                                                                       | `backfill_test`                                                      |
+| `backfill-verified.ts`                                                              | `backfill_verified_test`, `unit_bot_test`                            |
+| `tests/<suite>.ts`                                                                  | that suite (a changed browser suite runs the browser journey)        |
+| `deno.json`, `.gitignore`, `LICENSE`, `README.md`, `AGENTS.md`, `docs/*`, `tools/*` | `gate_mapping_test`                                                  |
+| anything else                                                                       | **exit 2, fail closed**                                              |
 
 Both guard suites (`gate_mapping_test`, `gate_config_test`) run on every invocation. An empty delta
 runs everything: "nothing changed" must never mean "nothing verified".
@@ -91,8 +91,8 @@ runs everything: "nothing changed" must never mean "nothing verified".
 ## Hermeticity (why a green gate means something)
 
 - `tests/testenv.ts` redirects `Deno.openKv` to `:memory:` before any KV is opened **and deletes
-  `DENO_KV_ACCESS_TOKEN`**, so no suite can read or write production KV, and the code suites run with
-  **no `--allow-net`** so an accidental live fetch fails closed. Bot ranges are seeded into KV
+  `DENO_KV_ACCESS_TOKEN`**, so no suite can read or write production KV, and the code suites run
+  with **no `--allow-net`** so an accidental live fetch fails closed. Bot ranges are seeded into KV
   instead of fetched.
 - The browser tier builds its own server in-process on `127.0.0.1`, uses a throwaway Chrome profile
   under `artifacts/`, and closes the browser in a `finally`. One browser at a time.
@@ -120,10 +120,11 @@ Two things a lane must not break:
 1. **`getKv()` is lazy and memoised** (`storage.ts:7`) — never top-level `await Deno.openKv()`; it
    breaks Deno Deploy builds. `DENO_KV_URL` overrides the URL (the tests point it at `:memory:`).
 2. **Sub-request hits update the recent-index snapshot through a deadline-bounded compare-and-set**
-   (`casRetry`, `CAS_DEADLINE_MS = 2000`, `storage.ts:149`). A plain get→set loses updates: measured 9
-   of 12 concurrent sub-requests dropped with the old attempt-bounded loop. Do not simplify it back.
-   The write is awaited before the asset response is chosen, so probe latency can reach ~2 s under
-   pathological contention — deliberate (a dropped count is permanent), tracked as `ua-tracer-c02`.
+   (`casRetry`, `CAS_DEADLINE_MS = 2000`, `storage.ts:149`). A plain get→set loses updates: measured
+   9 of 12 concurrent sub-requests dropped with the old attempt-bounded loop. Do not simplify it
+   back. The write is awaited before the asset response is chosen, so probe latency can reach ~2 s
+   under pathological contention — deliberate (a dropped count is permanent), tracked as
+   `ua-tracer-c02`.
 
 ## Request invariants
 
@@ -136,7 +137,7 @@ Two things a lane must not break:
 - Every asset/probe hit is recorded with the UA, IP, headers and server timestamp; a bot hit is
   tagged **verified** (UA claims bot X and the IP is inside X's published range), **unverified**
   (claims X, IP is not — a spoof) or **unverifiable** (X publishes no ranges). A range source that
-  cannot be resolved must classify as *unverified/unverifiable*, never *verified*.
+  cannot be resolved must classify as _unverified/unverifiable_, never _verified_.
 - `*.deno.net` / `*.deno.dev` → `301` to the canonical origin; `/api/health` is exempt so uptime
   monitors are not redirected.
 - `HEAD` must return the same headers as `GET` with an empty body.

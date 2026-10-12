@@ -114,3 +114,85 @@ Deno.test("backfill-verified skips malformed trace entries", async () => {
   if (result.scanned !== 2) throw new Error(JSON.stringify(result));
   if (result.updated !== 1) throw new Error(JSON.stringify(result));
 });
+
+// ---- ua-tracer-5ub: the snapshot mirror is a compare-and-set, not a bare write ----
+
+Deno.test("an increment that lands while the snapshots are read is not rolled back", async () => {
+  await clearKv();
+  const kv = await testKv();
+  await seedBotRanges({ "Googlebot": ["66.249.64.0/19"] });
+  const t = trace("racy", "Mozilla/5.0 (compatible; Googlebot/2.1)", "66.249.66.9");
+  await seed(kv, t, true);
+  const rKey = recentIndexKey(t.ts, t.id);
+  const uKey = uaIndexKey(t.ua, t.ts, t.id);
+
+  // Hits have already been counted: the snapshots are at 3, not 0.
+  for (const key of [rKey, uKey]) {
+    const cur = (await kv.get<TraceStats>(key)).value!;
+    await kv.set(key, { ...cur, assetCount: 3 });
+  }
+
+  // The concurrent hit's increment commits at exactly the point the old code had read
+  // behind it. Once is the race; the retry must then be allowed to win.
+  let interleaved = 0;
+  const result = await runBackfillVerified(kv, {
+    afterRead: async () => {
+      if (interleaved++ > 0) return;
+      for (const key of [rKey, uKey]) {
+        const cur = (await kv.get<TraceStats>(key)).value!;
+        await kv.set(key, { ...cur, assetCount: cur.assetCount + 1 });
+      }
+    },
+    delay: () => Promise.resolve(),
+    warn: () => {},
+  });
+
+  for (const key of [rKey, uKey]) {
+    const after = (await kv.get<TraceStats>(key)).value!;
+    if (after.assetCount !== 4) {
+      throw new Error(
+        `${
+          JSON.stringify(key)
+        }: assetCount ${after.assetCount}, expected 4 - the concurrent increment was rolled back`,
+      );
+    }
+    if (!after.verified) {
+      throw new Error(`${JSON.stringify(key)}: verified did not land on the new count`);
+    }
+  }
+  if (result.unsettled !== 0) throw new Error(`unsettled ${result.unsettled}`);
+});
+
+Deno.test("a snapshot that cannot be settled is counted, reported, and not a success", async () => {
+  await clearKv();
+  const kv = await testKv();
+  await seedBotRanges({ "Googlebot": ["66.249.64.0/19"] });
+  const t = trace("busy", "Mozilla/5.0 (compatible; Googlebot/2.1)", "66.249.66.9");
+  await seed(kv, t, true);
+  const rKey = recentIndexKey(t.ts, t.id);
+  const uKey = uaIndexKey(t.ua, t.ts, t.id);
+
+  const warnings: string[] = [];
+  const result = await runBackfillVerified(kv, {
+    // A writer that never stops, so every attempt's check fails.
+    afterRead: async () => {
+      for (const key of [rKey, uKey]) {
+        const cur = (await kv.get<TraceStats>(key)).value!;
+        await kv.set(key, { ...cur, assetCount: cur.assetCount + 1 });
+      }
+    },
+    deadlineMs: 0,
+    delay: () => Promise.resolve(),
+    warn: (message) => warnings.push(message),
+  });
+
+  if (result.unsettled !== 1) throw new Error(`unsettled ${result.unsettled}, expected 1`);
+  if (!warnings.some((w) => w.includes("busy"))) {
+    throw new Error(`no warning naming the trace: ${JSON.stringify(warnings)}`);
+  }
+  // The trace record still got its verdict; the MIRROR is what failed, and the CLI exits
+  // non-zero for exactly this.
+  if (!(await kv.get<TraceRecord>(["trace", t.id])).value?.verified) {
+    throw new Error("the trace record was not re-tagged");
+  }
+});

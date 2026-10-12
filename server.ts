@@ -39,6 +39,7 @@ export { cidrContains4, classifyBot, ipv4ToInt } from "./bot-verification.ts";
 export type { BotVerification } from "./bot-verification.ts";
 export { getKv, normUa, recentIndexKey, uaAggKey, uaIndexKey } from "./storage.ts";
 export type { HitRecord, TraceRecord, TraceStats, UaAggregate } from "./storage.ts";
+import { registerRepairCron, repairHealth } from "./crons.ts";
 
 // ua-tracer — determine what a user agent (especially crawlers) actually
 // downloads, follows, and executes when it fetches a web page.
@@ -806,11 +807,20 @@ async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise
     // credentials exist on a project VM. null off-platform, where it is unset.
     // (DENO_DEPLOYMENT_ID is deliberately not exposed: it identifies the whole
     // configuration set rather than the revision.)
+    //
+    // `repair` (ua-tracer-2t9) is additive and non-secret: when the scheduled snapshot
+    // repair last ran, its counts, and whether an unsettled or failing run is the last
+    // thing it did. `ok` is false when the schedule is expected but not running, so a
+    // job that has stopped firing - or never fired - is a FAILURE here rather than a
+    // timestamp that quietly goes stale. A run that never happened is reported as
+    // "never-ran" rather than folded into "ok".
+    const repair = await repairHealth(await getKv());
     return new Response(
       JSON.stringify({
-        ok: true,
+        ok: !repair.stale,
         ts: Date.now(),
         build: Deno.env.get("DENO_DEPLOY_BUILD_ID") ?? null,
+        repair,
       }),
       { headers: { "content-type": "application/json" } },
     );
@@ -903,7 +913,20 @@ export async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promi
 
 // Only start the server when this file is the entrypoint — importing it (e.g.
 // from the backfill script) must NOT call Deno.serve().
+//
+// The scheduled snapshot repair (ua-tracer-2t9) is registered in the same block, and
+// that placement is load-bearing in both directions:
+//  - Deno Deploy discovers `Deno.cron()` definitions by evaluating the ENTRY module's
+//    top-level code, so a registration hidden behind a runtime branch that is false in
+//    production would make the whole feature inert;
+//  - a test suite that imports this file is not the entry module, so `import.meta.main`
+//    is false and the registration CANNOT happen in a test process at all — the suites
+//    are structurally incapable of registering a cron rather than usually harmless.
 if (import.meta.main) {
+  const registration = registerRepairCron();
+  if (!registration.registered) {
+    console.log(`[cron] snapshot repair not scheduled: ${registration.reason}`);
+  }
   console.log("ua-tracer starting…");
   Deno.serve(handler);
 }

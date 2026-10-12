@@ -101,9 +101,10 @@ them), so they reveal which agents probe for agent-directive files — and which
   asset _types_ were fetched, whether CSS-linked resources / the iframe were followed, whether
   classic JS and ES modules executed, the bot verification, and — if JS ran — the client-side
   resource-timing waterfall the page posted back.
-- **`/api/health`** — `{ "ok": true, "ts": …, "build": … }`, where `build` is the revision Deno
-  Deploy is running (null off-platform). It changes on every deploy, so it answers "did my landing
-  actually go live" from outside; the build id is mapped to a commit in the Deno Deploy console.
+- **`/api/health`** — `{ "ok": true, "ts": …, "build": … }`, where `build` is the Deno Deploy
+  build id of the running revision (not the git commit sha; null off-platform). It changes on
+  every deploy, so it answers "did my landing actually go live" from outside; the build id is
+  mapped to a commit in the Deno Deploy console.
 
 ## How to use it
 

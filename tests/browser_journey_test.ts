@@ -66,8 +66,8 @@ class Cdp {
       return;
     }
     const key = msg.method ?? "";
-    for (const fn of this.#waiters.get(key) ?? []) fn(msg.params ?? {});
-    this.#waiters.delete(key);
+    // Waiters are persistent; `once` removes its own after its first call.
+    for (const fn of [...(this.#waiters.get(key) ?? [])]) fn(msg.params ?? {});
   }
 
   send(
@@ -85,7 +85,7 @@ class Cdp {
     return p;
   }
 
-  /** Resolve on the next occurrence of a CDP event (optionally session-scoped). */
+  /** Resolve on the next occurrence of a CDP event. */
   once(method: string, timeoutMs = 20_000): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
@@ -93,12 +93,22 @@ class Cdp {
         timeoutMs,
       );
       const list = this.#waiters.get(method) ?? [];
-      list.push((params) => {
+      const fn = (params: Record<string, unknown>) => {
         clearTimeout(timer);
+        const i = list.indexOf(fn);
+        if (i >= 0) list.splice(i, 1);
         resolve(params);
-      });
+      };
+      list.push(fn);
       this.#waiters.set(method, list);
     });
+  }
+
+  /** Subscribe to every future occurrence of a CDP event. */
+  listen(method: string, fn: (params: Record<string, unknown>) => void) {
+    const list = this.#waiters.get(method) ?? [];
+    list.push(fn);
+    this.#waiters.set(method, list);
   }
 
   close() {
@@ -182,6 +192,17 @@ Deno.test({
       }) as { sessionId: string };
       await cdp.send("Page.enable", {}, sessionId);
       await cdp.send("Runtime.enable", {}, sessionId);
+      await cdp.send("Network.enable", {}, sessionId);
+
+      // Every sub-resource response the engine actually received, so the journey
+      // can assert the probes were SERVED with 200 and not merely logged. Without
+      // this the suite would still pass if handleAsset 404'd every asset, because
+      // logHit records the hit before the response is chosen.
+      const responses: { url: string; status: number }[] = [];
+      cdp.listen("Network.responseReceived", (params) => {
+        const r = params.response as { url?: string; status?: number } | undefined;
+        if (r?.url) responses.push({ url: r.url, status: r.status ?? 0 });
+      });
 
       const loaded = cdp.once("Page.loadEventFired");
       await cdp.send("Page.navigate", { url: `${origin}/` }, sessionId);
@@ -204,6 +225,15 @@ Deno.test({
         sessionId,
       ) as { result: { value: string } };
       if (!title.result.value) throw new Error("page has no title");
+
+      // The CSS-linked probe panel really rendered: css-bg.png and css-font.woff2
+      // are only fetched because it lays out as a sized box using that @font-face.
+      const panel = await cdp.send(
+        "Runtime.evaluate",
+        { expression: "!!document.querySelector('.ua-tracer-probe')", returnByValue: true },
+        sessionId,
+      ) as { result: { value: boolean } };
+      if (!panel.result.value) throw new Error("the CSS probe panel did not render");
 
       // --- the actual acceptance assertions, read back from the server's KV ---
       const traces: TraceRecord[] = [];
@@ -266,6 +296,28 @@ Deno.test({
         throw new Error("no client-side resource timing entries were posted");
       }
 
+      // Every probe request the engine made must have been SERVED, not just
+      // logged: a probe that 404'd would be recorded as a hit all the same,
+      // because logHit runs before the response is chosen. The two Reporting-API
+      // endpoints answer 204 by contract; every other probe must be 200.
+      const probeResponses = responses.filter((r) => r.url.includes(`/r/${trace.id}/`));
+      const isReport = (url: string) => /\/(csp-report|report)$/.test(new URL(url).pathname);
+      const notOk = probeResponses.filter((r) => r.status !== (isReport(r.url) ? 204 : 200));
+      if (notOk.length) {
+        throw new Error(
+          `probe responses were not as expected: ${
+            notOk.map((r) => `${r.status} ${r.url}`).join(", ")
+          }`,
+        );
+      }
+      if (probeResponses.length < hits.length - 1) {
+        throw new Error(
+          `only ${probeResponses.length} probe responses for ${
+            hits.length - 1
+          } recorded sub-requests`,
+        );
+      }
+
       const detail = await handler(new Request(`${origin}/trace/${trace.id}`));
       const detailHtml = await detail.text();
       for (const label of ["ES module executed", "image inside iframe", "client timing POST"]) {
@@ -278,6 +330,7 @@ Deno.test({
         origin,
         hits: hits.length,
         assetCount: stats.assetCount,
+        probeResponses: probeResponses.length,
         kinds: [...kinds].sort(),
         timingEntries: timing.timing.length,
         timingFirstEntry: timing.timing[0],

@@ -166,7 +166,7 @@ function randomBotName(): string {
   return `${pick(adjectives)}${pick(nouns)}Bot/${major}.${minor}`;
 }
 
-function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
+export function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
   // Deno Deploy sets x-forwarded-for; fall back to remote addr.
   const xff = req.headers.get("x-forwarded-for");
   if (xff) return xff.split(",")[0].trim();
@@ -183,7 +183,7 @@ function headersToObject(headers: Headers): Record<string, string> {
   return obj;
 }
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -192,12 +192,12 @@ function escapeHtml(s: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function fmtTs(ms: number): string {
+export function fmtTs(ms: number): string {
   return new Date(ms).toISOString().replace("T", " ").replace("Z", " UTC");
 }
 
 // Human-friendly elapsed duration, e.g. "830ms", "4.2s", "3m", "1h 5m".
-function fmtDelta(ms: number): string {
+export function fmtDelta(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   const s = ms / 1000;
   if (s < 60) return `${s.toFixed(1)}s`;
@@ -214,7 +214,7 @@ function fmtDelta(ms: number): string {
 //   - the "compatible; X" token (ClaudeBot/1.0, Googlebot/2.1, ChatGPT-User/1.0)
 //   - else a meaningful Name/Version token (Chrome/120, Edg/120, curl/8.0)
 // The full UA is still rendered beneath it.
-function uaHeadline(ua: string): string {
+export function uaHeadline(ua: string): string {
   if (!ua) return "(no user-agent)";
   // Bots: "compatible; Name/Ver" or "compatible; Name"
   const compat = ua.match(/compatible;\s*([^;,)]+)/i);
@@ -443,7 +443,7 @@ const BOT_RANGES_TTL_MS = 24 * 60 * 60 * 1000; // refresh cached ranges daily
 
 // IPv4 CIDR containment (Deno Deploy client IPs are IPv4 or IPv4-mapped IPv6;
 // IPv6 ranges exist for some bots but are not matched in this first version).
-function ipv4ToInt(ip: string): number | null {
+export function ipv4ToInt(ip: string): number | null {
   const parts = ip.split(".");
   if (parts.length !== 4) return null;
   let n = 0;
@@ -454,7 +454,7 @@ function ipv4ToInt(ip: string): number | null {
   }
   return n >>> 0;
 }
-function cidrContains4(cidr: string, ipInt: number): boolean {
+export function cidrContains4(cidr: string, ipInt: number): boolean {
   const slash = cidr.indexOf("/");
   if (slash < 0) return cidr === String(ipInt); // single host, rare
   const base = ipv4ToInt(cidr.slice(0, slash));
@@ -466,6 +466,14 @@ function cidrContains4(cidr: string, ipInt: number): boolean {
 
 // Fetch + cache a source's prefixes in KV; refresh when older than the TTL.
 let _rangeCache: Map<string, { fetchedAt: number; prefixes: string[] }> | null = null;
+
+// Drop the in-process range cache. `_rangeCache` is checked BEFORE KV and holds a
+// 24h TTL, so anything that clears the KV ranges (tests, a manual re-seed) must
+// drop this too or it keeps serving the cleared prefixes. Exported for
+// tests/testenv.ts; not used by the request path.
+export function resetBotRangeCache(): void {
+  _rangeCache = null;
+}
 async function getBotRanges(
   source: { name: string; url: string },
 ): Promise<string[]> {
@@ -581,6 +589,32 @@ export interface UaAggregate {
   jsRan: number;
 }
 
+// Deadline-bounded compare-and-set retry for the denormalised KV snapshots.
+// `attemptOnce` returns true when it committed (or found nothing to update).
+// Why a deadline and not an attempt count: contention is proportional to the number of
+// concurrent sub-requests for one trace and every CAS loser burns an attempt, so a small
+// fixed count silently dropped updates (measured: 9 of 12 hits recorded).
+// Why bounded and awaited: `logHit` runs before the asset response is chosen, so this is
+// also the worst-case extra latency on a probe response (2s, only under pathological
+// contention). Accuracy wins that trade - a dropped count is permanent - and moving the
+// denormalisation off the probe response path is the real fix, filed as a follow-up.
+const CAS_DEADLINE_MS = 2000;
+async function casRetry(
+  what: string,
+  attemptOnce: () => Promise<boolean>,
+): Promise<void> {
+  const started = performance.now();
+  for (let attempt = 1;; attempt++) {
+    if (await attemptOnce()) return;
+    if (performance.now() - started > CAS_DEADLINE_MS) {
+      console.warn(`[kv] gave up updating ${what} after ${attempt} attempts`);
+      return;
+    }
+    // Small jittered backoff so the retries do not re-collide in lockstep.
+    await new Promise((r) => setTimeout(r, 1 + Math.random() * 7));
+  }
+}
+
 async function logHit(rec: HitRecord): Promise<void> {
   const kv = await getKv();
   // Sequence per trace so we can list hits in receive order. Use a counter via
@@ -596,19 +630,23 @@ async function logHit(rec: HitRecord): Promise<void> {
   // record to get it.
   if (rec.kind !== "homepage") {
     const trace = await kv.get<TraceRecord>(["trace", rec.id]);
-    if (trace.value) {
-      const recentKey = recentIndexKey(trace.value.ts, rec.id);
-      const uKey = uaIndexKey(trace.value.ua, trace.value.ts, rec.id);
-      const aKey = uaAggKey(trace.value.ua);
+    const tv = trace.value;
+    if (tv) {
+      const recentKey = recentIndexKey(tv.ts, rec.id);
+      const uKey = uaIndexKey(tv.ua, tv.ts, rec.id);
+      const aKey = uaAggKey(tv.ua);
       // Concurrent sub-requests (css-bg, js-ran, font, …) all update the same
-      // stats entry, so use an atomic compare-and-set on the versionstamp with
-      // a small retry loop. A plain get→set races and loses updates (e.g. the
-      // jsRan flag getting clobbered). The same atomic also mirrors the
-      // snapshot to the per-UA index and bumps the per-UA aggregate, so all
-      // three views stay consistent.
-      for (let attempt = 0; attempt < 8; attempt++) {
+      // stats entry, so use an atomic compare-and-set on the versionstamp. A
+      // plain get→set races and loses updates (e.g. the jsRan flag getting
+      // clobbered). The same atomic also mirrors the snapshot to the per-UA
+      // index and bumps the per-UA aggregate, so all three views stay
+      // consistent. Retries are deadline-bounded, not attempt-bounded: a real
+      // browser fires ~12 sub-resources at once, every CAS loser burns an
+      // attempt, and a fixed 8-attempt count silently dropped updates
+      // (measured: 9 of 12 hits recorded).
+      await casRetry(`stats for trace ${rec.id}`, async () => {
         const cur = await kv.get<TraceStats>(recentKey);
-        if (!cur.value) break; // entry not seeded (shouldn't happen)
+        if (!cur.value) return true; // entry not seeded (shouldn't happen)
         const s = cur.value;
         const wasJsRan = s.jsRan;
         s.assetCount += 1;
@@ -618,7 +656,7 @@ async function logHit(rec: HitRecord): Promise<void> {
         // jsRan counter flips exactly once per trace (false -> true).
         const aggCur = await kv.get<UaAggregate>(aKey);
         const agg = aggCur.value ??
-          { ua: trace.value.ua || "(no user-agent)", count: 0, jsRan: 0 };
+          { ua: tv.ua || "(no user-agent)", count: 0, jsRan: 0 };
         const aggNext: UaAggregate = {
           ua: agg.ua,
           count: agg.count,
@@ -631,10 +669,8 @@ async function logHit(rec: HitRecord): Promise<void> {
           .set(uKey, s)
           .set(aKey, aggNext)
           .commit();
-        if (res.ok) break;
-        // Lost the race: brief backoff, then retry with fresh value.
-        await new Promise((r) => setTimeout(r, 5 + attempt * 5));
-      }
+        return res.ok;
+      });
     }
   }
 
@@ -1902,10 +1938,10 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
       .set(recentIndexKey(ts, id), seedStats)
       .set(uaIndexKey(ua, ts, id), seedStats)
       .commit();
-    // Bump the per-UA aggregate (count of homepage traces by this UA). Done
-    // with its own CAS because it is a separate key that many traces share.
+    // Bump the per-UA aggregate (count of homepage traces by this UA). Its own
+    // CAS because it is a separate key that many traces share.
     const aKey = uaAggKey(ua);
-    for (let attempt = 0; attempt < 8; attempt++) {
+    await casRetry(`ua aggregate ${normUa(ua)}`, async () => {
       const aggCur = await kv.get<UaAggregate>(aKey);
       const agg = aggCur.value ??
         { ua: ua || "(no user-agent)", count: 0, jsRan: 0 };
@@ -1913,9 +1949,8 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
         .check({ key: aKey, versionstamp: aggCur.versionstamp })
         .set(aKey, { ua: agg.ua, count: agg.count + 1, jsRan: agg.jsRan })
         .commit();
-      if (res.ok) break;
-      await new Promise((r) => setTimeout(r, 5 + attempt * 5));
-    }
+      return res.ok;
+    });
     // Also log the homepage itself as a hit so the trace waterfall has a root.
     await logHit({ id, kind: "homepage", ts, ua, ip, method: req.method, headers });
 
@@ -2203,7 +2238,6 @@ async function handleTraces(req: Request): Promise<Response> {
   const uaEntries = uaFilter
     ? uaEntriesAll.filter(([ua]) => (ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
     : uaEntriesAll;
-  const uaGroups = new Map<string, { count: number; jsRan: number }>(uaEntriesAll);
   const filtered = (uaFilter ? (await searchTracesByUa(uaFilter)).traces : allTraces)
     .filter((t) => !jsOnly || t.jsRan);
 
@@ -2374,7 +2408,7 @@ async function handleTrace(id: string): Promise<Response> {
 </div>
 </section>`;
 
-  const rows = hits.map((h, i) => {
+  const rows = hits.map((h) => {
     const delta = h.ts - t0;
     // The request row, then a full-width row beneath it holding the headers
     // expando so it spans the whole table instead of being squashed into the
@@ -2666,7 +2700,7 @@ async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise
 // monitoring tools and some crawlers issue HEAD; returning 404 for it was a
 // broken signal. We route the request through the normal handler (so it still
 // gets the full set of response headers) and then drop the body.
-async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
+export async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
   const res = await routeHandler(req, info);
   if (req.method === "HEAD") {
     return new Response(null, { status: res.status, headers: res.headers });

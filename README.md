@@ -147,6 +147,21 @@ deno task backfill         # one-off maintenance over stored traces
 deno task backfill-verify  # retroactively re-tag traces with IP-range verification
 ```
 
+## Tests and the gate
+
+```sh
+deno task test:fast    # fmt + lint + typecheck + only the suites a change affects
+deno task test:full    # every suite, plus a real headless-Chrome journey
+deno task test:file tests/http_test.ts   # one suite
+```
+
+Both tiers include `deno task check:all`. The suites are hermetic: they run
+against an in-memory Deno KV (`tests/testenv.ts`) with no network, and the browser
+journey starts its own server in-process on 127.0.0.1. `tools/fast-gate.sh` maps a
+changed path to the suites it affects and **fails closed** — a path nobody has
+mapped exits non-zero and names the file. Budgets, the mapping table and the
+measured timings are in [docs/speed.md](docs/speed.md).
+
 ## Deploy
 
 Deployed to Deno Deploy; the entrypoint is `server.ts` (dynamic runtime). The canonical domain is

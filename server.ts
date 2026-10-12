@@ -70,19 +70,7 @@ function headersToObject(headers: Headers): Record<string, string> {
   return obj;
 }
 
-// ---------------------------------------------------------------------------
-// Real tiny binary assets (generated/embedded — no Node Buffer).
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Logging of hits
-// ---------------------------------------------------------------------------
-
-// Deadline-bounded compare-and-set retry for the denormalised KV snapshots.
-// `attemptOnce` returns true when it committed (or found nothing to update).
-// The bound is a deadline rather than an attempt count because contention is
-// proportional to the number of concurrent sub-requests for one trace and every
-// CAS loser burns an attempt — a small fixed count silently dropped updates.
+// Common HTTP headers for responses from the route handlers.
 function noStore(headers: HeadersInit = {}): Headers {
   const h = new Headers(headers);
   // Defeat caching so crawlers re-fetch and we always log.

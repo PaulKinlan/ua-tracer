@@ -50,6 +50,7 @@ FAST_SUITES=(
   tests/kv_behaviour_test.ts
   tests/backfill_test.ts
   tests/backfill_verified_test.ts
+  tests/cron_test.ts
   tests/http_test.ts
 )
 

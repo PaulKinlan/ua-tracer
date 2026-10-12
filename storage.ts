@@ -146,7 +146,11 @@ export interface UaAggregate {
 // retry count). Awaiting this on the probe response path adds at most 2s under
 // pathological contention; dropping a count is permanent. Moving denormalisation
 // off the response path is a separate follow-up.
-const CAS_DEADLINE_MS = 2000;
+// Bound on how long a CAS retry loop may chase a contended key. Exported because the
+// backfill repair pass must pace its verification by at least this long: a writer that
+// lost a race is finished (committed or given up) within this window, which is what
+// makes a paced verification strong enough to prove no writer is still straddling it.
+export const CAS_DEADLINE_MS = 2000;
 export async function casRetry(
   what: string,
   attemptOnce: () => Promise<boolean>,

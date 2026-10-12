@@ -46,7 +46,6 @@ Deno.test("every tracked file is mapped, or explicitly requires the full gate", 
   const missing: string[] = [];
   for (const file of files) {
     const r = await run(["--map", file]);
-    if (r.code === 5) continue; // explicitly full-gate-only
     if (r.code === 2) {
       unmapped.push(file);
       continue;
@@ -147,12 +146,18 @@ Deno.test("the full tier is a superset of the affected tier (full includes fast)
   }
 });
 
-Deno.test("the browser suite is the only full-gate-only suite, and the script says so", async () => {
-  const r = await run(["--map", "tests/browser_journey_test.ts"]);
-  if (r.code !== 5) throw new Error(`expected exit 5, got ${r.code}`);
-  const dry = await run(["--all-suites", "--dry-run"]);
-  if (lines(dry.stdout).includes("tests/browser_journey_test.ts")) {
-    throw new Error("--all-suites must not claim to run the browser journey");
+Deno.test("the browser journey runs for its own changes and in the full tier", async () => {
+  const mapped = await suites(["--map", "tests/browser_journey_test.ts"]);
+  if (mapped.join() !== "tests/browser_journey_test.ts") {
+    throw new Error(`a changed browser suite must map to itself, got ${mapped.join(",")}`);
+  }
+  const full = await suites(["--all-suites", "--dry-run"]);
+  if (!full.includes("tests/browser_journey_test.ts")) {
+    throw new Error("the full tier must run the browser journey");
+  }
+  // ...but a code change must not drag Chrome into every fast run.
+  if ((await suites(["--map", "server.ts"])).includes("tests/browser_journey_test.ts")) {
+    throw new Error("server.ts must not select the browser suite in the fast tier");
   }
 });
 

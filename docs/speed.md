@@ -8,9 +8,14 @@ the contract for how long each tier may take and which suite a change must run.
 
 | Tier | Command | Budget | Measured (2026-10-12, 2-vCPU VM, warm) |
 | --- | --- | --- | --- |
-| Fast | `deno task test:fast` | **<= 60 s** (fleet R2) | ~8 s affected / ~10 s `--all-suites` |
-| Full | `deno task test:full` | **<= 300 s** (fleet R1) | ~14 s |
-| Changed file only | `deno task test:file tests/<suite>.ts` | — | ~2 s |
+| Fast | `deno task test:fast` | **<= 60 s** (fleet R2) | ~7 s end to end (code-only delta: ~3 s) |
+| Full | `deno task test:full` | **<= 300 s** (fleet R1) | ~7 s end to end |
+| Changed file only | `deno task test:file tests/<suite>.ts` | — | ~1.3 s for all seven code suites |
+
+Composition of the measured fast run: `check:all` (fmt + lint + typecheck) ~0.2 s
+with a warm typecheck cache (~5 s cold, i.e. the first run after a Deno upgrade),
+the mapping guard ~0.9 s, the seven code suites ~1.3 s, and the browser journey
+~3.6 s when — and only when — the delta touches it.
 
 Both tiers include `deno task check:all` (fmt + lint + typecheck). The full tier
 is the fast tier with every suite, not the affected subset, plus the browser
@@ -25,9 +30,14 @@ CHECK_TIMEOUT=300
 CHECK_FAST_TIMEOUT=60
 ```
 
+After changing the gate, `deno task test:mapping` proves the dispatcher again —
+including that an unmapped path still fails closed.
+
 Implementers run `fleet-check --fast`. The **full** gate runs once per landing, on
 the merger's merged union — never from an implementer lane while the merger's gate
-is queued (one heavy slot per VM).
+is queued (one heavy slot per VM). `fleet-check` auto-detects `deno task check`
+from `deno.json` when the VM config is missing, so the `check` task aliases the
+full gate rather than being a third definition of it.
 
 ## Suites
 
@@ -50,19 +60,20 @@ prints the mapping; `--dry-run` prints the resolved set):
 
 | Changed path | Suites |
 | --- | --- |
-| `server.ts`, `tests/testenv.ts` | every non-browser suite (routing, KV schema and the whole write path live in the entrypoint) |
+| `server.ts`, `tests/testenv.ts` | every non-browser suite (routing, KV schema and the whole write path live in the entrypoint; the browser journey stays the full gate's job so Chrome is not in every fast run) |
 | `backfill.ts` | `backfill_test` |
 | `backfill-verified.ts` | `backfill_verified_test`, `unit_bot_test` |
-| `tests/<suite>.ts` | that suite |
-| `tests/browser_journey_test.ts` | **fails closed (exit 5)** — run `deno task test:browser`; the fast tier cannot certify it |
+| `tests/<suite>.ts` | that suite, including the browser suite: a change to it is exactly when a browser run is worth paying for |
+| `tests/browser_journey_test.ts` | that suite, run as `deno task test:browser` (~3.6 s) |
 | `deno.json`, `tools/*`, `README.md`, `docs/*`, `LICENSE`, `.gitignore` | `gate_mapping_test` (the bounded subset that proves the dispatcher still maps) |
 | anything else | **fails closed (exit 2)**, naming the file |
 
 An empty delta runs every suite: "nothing changed" must never mean "nothing
 verified". The mapping is self-checking: `tests/gate_mapping_test.ts` walks
-`git ls-files` and fails if any tracked file is neither mapped nor explicitly
-full-gate-only, and proves the fail-closed behaviour with a real unmapped file in
-the delta.
+`git ls-files` and fails if any tracked file is unmapped, and proves the
+fail-closed behaviour with a real unmapped file in the delta. It also asserts the
+full tier is a superset of every affected-tier resolution, so "full includes
+fast" is tested rather than assumed.
 
 ## Hermeticity
 
@@ -85,7 +96,9 @@ The suites are the reason a green gate means something:
   process-wide one; that seam is what makes them testable at all.
 - The social-unfurler probes (`og-image`, `twitter-image`) and `manifest-icon` have
   no browser-tier assertion: a rendering engine is not expected to fetch them, so
-  the correct verification is an HTTP-level one (they are covered by `http_test`).
+  the correct verification is an HTTP-level one (they are covered by `http_test`),
+  and the browser suite documents why rather than asserting a claim a browser
+  cannot make.
 - No coverage measurement yet: this change moves the project from zero executing
   tests to a gate, which is the precondition for a coverage threshold.
 

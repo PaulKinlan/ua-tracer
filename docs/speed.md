@@ -152,20 +152,20 @@ The suites are the reason a green gate means something:
   rather than something the window prevents. What the window still covers is snapshots
   written by versions before that atomic existed, and writers that clobber a snapshot
   without a CAS check (`ua-tracer-5ub`); for those it remains evidence, not proof. What
-  repair cannot reach is a record that was never stored at all - see the hit-key
-  collision note below. Moving the denormalisation off the response path is therefore a
+  repair cannot reach is a record that was never stored at all. Moving the denormalisation off the response path is therefore a
   latency decision nobody has taken rather than a repair-safety one; it is not proposed
   here.
-- A probe's RECORD can still be lost before it is stored: the hit key is a
-  microsecond timestamp, so two hits for one trace that sample the clock inside
-  the same microsecond would collide and the later write would win
-  (`ua-tracer-6sn`). Measured, a 384-way concurrent burst did not reach it, but
-  it is a timestamp used as an identity rather than a counter, so it is a real
-  floor under "reconstructible from raw hits": the backfill pass can re-derive a
-  count from the records that exist, and cannot invent a record that never
-  landed. Client-supplied payloads (the `/timing` array, a report body) are
-  bounded before the write instead, so an over-sized payload costs the payload
-  and not the probe.
+- A probe's record used to be able to overwrite another one: the hit key was a microsecond
+  timestamp, so two hits for one trace that sampled the clock inside the same microsecond
+  collided and the later write won (`ua-tracer-6sn`; measured, a 384-way concurrent burst
+  did not reach it, which is why it was P3 rather than P1). The key now carries a random
+  suffix, generated once per hit before the retry loop, so a retried commit cannot mint a
+  second record for the same hit either. Existing records are untouched: every read of a
+  hit is prefix-based and nothing parses a hit key's shape, so keys written before the
+  change stay readable with no migration. What is still not reconstructible from raw hits
+  is a record that could not be STORED at all - which is why client-supplied payloads (the
+  `/timing` array, a report body) are bounded before the write, so an over-sized payload
+  costs the payload and not the probe.
 - No coverage measurement yet: this change moves the project from zero executing
   tests to a gate, which is the precondition for a coverage threshold.
 

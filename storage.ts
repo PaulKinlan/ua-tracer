@@ -474,13 +474,34 @@ async function storeRecordAlone(
   }
 }
 
+/**
+ * The key a hit's record is stored under. The timestamp segment orders hits within a
+ * trace, but a timestamp is not an IDENTITY: two hits for one trace can sample the same
+ * microsecond, and before ua-tracer-6sn the later write simply overwrote the earlier
+ * record - a lost probe with no trace of the loss. The random suffix makes the key
+ * unique.
+ *
+ * It is generated ONCE per hit: the caller builds the key before its retry loop, so a
+ * retried commit cannot mint a SECOND record for the same hit.
+ *
+ * READ COMPATIBILITY, which is the reason this was safe to change: every read of a hit is
+ * prefix-based (`kv.list({ prefix: ["hit", id] })`) and nothing anywhere parses the shape
+ * of a hit key, so records written before this change - without the suffix - stay readable
+ * with no migration and no rewrite. A legacy key and a suffixed key are therefore treated
+ * identically by the waterfall, by `deno task backfill`, and by every counter that
+ * re-derives from the records.
+ */
+export function hitKeyFor(id: string, tsNanos: bigint): Deno.KvKey {
+  return ["hit", id, tsNanos.toString().padStart(25, "0"), shortId()];
+}
+
 export async function logHit(rec: HitRecord): Promise<void> {
   const kv = await getKv();
   // Sequence per trace so we can list hits in receive order. Use a counter via
   // atomic-ish read+write; collisions are fine (we order by ts then seq).
   const tsNanos = BigInt(rec.ts) * 1000000n +
     BigInt(Math.floor(performance.now() * 1000) % 1000000);
-  const hitKey: Deno.KvKey = ["hit", rec.id, tsNanos.toString().padStart(25, "0")];
+  const hitKey: Deno.KvKey = hitKeyFor(rec.id, tsNanos);
 
   // Only a non-homepage hit has a count to keep in step with its record: the
   // homepage entry is seeded by seedTrace (with its own CAS on the aggregate) and

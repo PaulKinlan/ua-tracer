@@ -15,7 +15,14 @@ import {
   type UaAggregate,
   uaIndexKey,
 } from "../server.ts";
-import { casRetry, commitHit, logHit, MAX_RECORD_BYTES } from "../storage.ts";
+import {
+  type AssetKind,
+  casRetry,
+  commitHit,
+  hitKeyFor,
+  logHit,
+  MAX_RECORD_BYTES,
+} from "../storage.ts";
 import { runBackfill } from "../backfill.ts";
 
 const UA = "ConcurrentBot/9.9";
@@ -510,5 +517,117 @@ Deno.test("a header over the value cap is trimmed before the write, not rejected
   }
   if (!stored.headers["x-payload-truncated"]) {
     throw new Error(`the trim is not marked: ${JSON.stringify(stored.headers)}`);
+  }
+});
+
+// ---- ua-tracer-6sn: a hit's key is an identity, not a timestamp ----
+// The key's timestamp segment orders hits within a trace, but two hits for one trace can
+// sample the same microsecond. Before this the later write simply overwrote the earlier
+// record: a lost probe with nothing recording the loss.
+
+Deno.test("two hits in the same microsecond bucket both survive", async () => {
+  await clearKv();
+  const kv = await testKv();
+  const { id } = await mintOnce();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+
+  // The same bucket, deliberately - not by hoping two calls land in the same microsecond.
+  const bucket = BigInt(trace.ts) * 1000000n + 4242n;
+  const first = hitKeyFor(id, bucket);
+  const second = hitKeyFor(id, bucket);
+  if (JSON.stringify(first) === JSON.stringify(second)) {
+    throw new Error("the hit key is still a pure timestamp (ua-tracer-6sn)");
+  }
+
+  const record = (kind: AssetKind): HitRecord => ({
+    id,
+    kind,
+    ts: trace.ts,
+    ua: UA,
+    ip: IP,
+    method: "GET",
+    headers: {},
+  });
+  await commitHit(kv, record("css"), first, trace, { warn: () => {} });
+  await commitHit(kv, record("js-ran"), second, trace, { warn: () => {} });
+
+  // TWO records under two distinct keys. `mintOnce` already wrote the trace's homepage
+  // record, so the prefix holds that one plus these two.
+  for (const key of [first, second]) {
+    if (!(await kv.get(key)).value) throw new Error(`no record at ${JSON.stringify(key)}`);
+  }
+  if (await countPrefix(["hit", id]) !== 3) {
+    throw new Error(
+      `expected the homepage record plus two, found ${await countPrefix(["hit", id])}`,
+    );
+  }
+  if ((await stats(id, trace.ts))?.assetCount !== 2) {
+    throw new Error(`assetCount ${(await stats(id, trace.ts))?.assetCount}, expected 2`);
+  }
+});
+
+Deno.test("keys written before the change stay readable and are counted", async () => {
+  await clearKv();
+  const kv = await testKv();
+  const { id } = await mintOnce();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+
+  // A key in the OLD shape, exactly as a deploy before this change wrote it.
+  const legacyKey: Deno.KvKey = ["hit", id, BigInt(trace.ts).toString().padStart(25, "0")];
+  const legacy: HitRecord = {
+    id,
+    kind: "css",
+    ts: trace.ts,
+    ua: UA,
+    ip: IP,
+    method: "GET",
+    headers: {},
+  };
+  await kv.set(legacyKey, legacy);
+  // A new hit, which lands a suffixed key beside it.
+  await logHit({ ...legacy, kind: "css" });
+
+  // The same prefix scan finds both, which is what every reader uses. The homepage record
+  // from `mintOnce` is a third, which is exactly the point: the scan is prefix-based and
+  // does not care which shape a key has.
+  if (await countPrefix(["hit", id]) !== 3) {
+    throw new Error("a legacy and a suffixed key were not both listed");
+  }
+  // And the repair pass, which re-derives counts from the records, counts BOTH: a legacy
+  // key and a suffixed key are treated identically.
+  const repaired = await runBackfill(kv, {
+    settleMs: 0,
+    now: () => trace.ts + 1_000_000,
+    delay: () => Promise.resolve(),
+  });
+  if (repaired.unsettled !== 0) throw new Error(`unsettled ${repaired.unsettled}`);
+  if ((await stats(id, trace.ts))?.assetCount !== 2) {
+    throw new Error(`repaired assetCount ${(await stats(id, trace.ts))?.assetCount}, expected 2`);
+  }
+});
+
+Deno.test("a pre-existing hit record is never rewritten by a new one", async () => {
+  await clearKv();
+  const kv = await testKv();
+  const { id } = await mintOnce();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+  const legacyKey: Deno.KvKey = ["hit", id, BigInt(trace.ts).toString().padStart(25, "0")];
+  const legacy: HitRecord = {
+    id,
+    kind: "css",
+    ts: trace.ts,
+    ua: UA,
+    ip: IP,
+    method: "GET",
+    headers: { "x-origin": "written-before-6sn" },
+  };
+  await kv.set(legacyKey, legacy);
+
+  await logHit({ ...legacy, kind: "css", headers: {} });
+
+  // No migration, no rewrite: the old record is byte-for-byte what was written.
+  const after = (await kv.get<HitRecord>(legacyKey)).value;
+  if (JSON.stringify(after) !== JSON.stringify(legacy)) {
+    throw new Error(`the legacy record changed: ${JSON.stringify(after)}`);
   }
 });

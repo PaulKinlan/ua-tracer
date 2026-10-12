@@ -166,7 +166,7 @@ function randomBotName(): string {
   return `${pick(adjectives)}${pick(nouns)}Bot/${major}.${minor}`;
 }
 
-function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
+export function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
   // Deno Deploy sets x-forwarded-for; fall back to remote addr.
   const xff = req.headers.get("x-forwarded-for");
   if (xff) return xff.split(",")[0].trim();
@@ -183,7 +183,7 @@ function headersToObject(headers: Headers): Record<string, string> {
   return obj;
 }
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -192,12 +192,12 @@ function escapeHtml(s: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function fmtTs(ms: number): string {
+export function fmtTs(ms: number): string {
   return new Date(ms).toISOString().replace("T", " ").replace("Z", " UTC");
 }
 
 // Human-friendly elapsed duration, e.g. "830ms", "4.2s", "3m", "1h 5m".
-function fmtDelta(ms: number): string {
+export function fmtDelta(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   const s = ms / 1000;
   if (s < 60) return `${s.toFixed(1)}s`;
@@ -214,7 +214,7 @@ function fmtDelta(ms: number): string {
 //   - the "compatible; X" token (ClaudeBot/1.0, Googlebot/2.1, ChatGPT-User/1.0)
 //   - else a meaningful Name/Version token (Chrome/120, Edg/120, curl/8.0)
 // The full UA is still rendered beneath it.
-function uaHeadline(ua: string): string {
+export function uaHeadline(ua: string): string {
   if (!ua) return "(no user-agent)";
   // Bots: "compatible; Name/Ver" or "compatible; Name"
   const compat = ua.match(/compatible;\s*([^;,)]+)/i);
@@ -443,7 +443,7 @@ const BOT_RANGES_TTL_MS = 24 * 60 * 60 * 1000; // refresh cached ranges daily
 
 // IPv4 CIDR containment (Deno Deploy client IPs are IPv4 or IPv4-mapped IPv6;
 // IPv6 ranges exist for some bots but are not matched in this first version).
-function ipv4ToInt(ip: string): number | null {
+export function ipv4ToInt(ip: string): number | null {
   const parts = ip.split(".");
   if (parts.length !== 4) return null;
   let n = 0;
@@ -454,7 +454,7 @@ function ipv4ToInt(ip: string): number | null {
   }
   return n >>> 0;
 }
-function cidrContains4(cidr: string, ipInt: number): boolean {
+export function cidrContains4(cidr: string, ipInt: number): boolean {
   const slash = cidr.indexOf("/");
   if (slash < 0) return cidr === String(ipInt); // single host, rare
   const base = ipv4ToInt(cidr.slice(0, slash));
@@ -2203,7 +2203,6 @@ async function handleTraces(req: Request): Promise<Response> {
   const uaEntries = uaFilter
     ? uaEntriesAll.filter(([ua]) => (ua || "").toLowerCase().includes(uaFilter.toLowerCase()))
     : uaEntriesAll;
-  const uaGroups = new Map<string, { count: number; jsRan: number }>(uaEntriesAll);
   const filtered = (uaFilter ? (await searchTracesByUa(uaFilter)).traces : allTraces)
     .filter((t) => !jsOnly || t.jsRan);
 
@@ -2374,7 +2373,7 @@ async function handleTrace(id: string): Promise<Response> {
 </div>
 </section>`;
 
-  const rows = hits.map((h, i) => {
+  const rows = hits.map((h) => {
     const delta = h.ts - t0;
     // The request row, then a full-width row beneath it holding the headers
     // expando so it spans the whole table instead of being squashed into the
@@ -2666,7 +2665,7 @@ async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise
 // monitoring tools and some crawlers issue HEAD; returning 404 for it was a
 // broken signal. We route the request through the normal handler (so it still
 // gets the full set of response headers) and then drop the body.
-async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
+export async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
   const res = await routeHandler(req, info);
   if (req.method === "HEAD") {
     return new Response(null, { status: res.status, headers: res.headers });

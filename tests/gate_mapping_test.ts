@@ -80,10 +80,14 @@ Deno.test("an unmapped file in the delta fails the gate closed, naming the file"
     if (!r.stderr.includes("UNMAPPED-PROBE.tmp")) {
       throw new Error(`the failure did not name the file: ${r.stderr.trim()}`);
     }
-    // `fast-gate: unmapped:` is a contract with the fleet's log parser, which publishes
-    // the list alongside the cached verdict.
-    if (!r.stderr.includes("fast-gate: unmapped: UNMAPPED-PROBE.tmp")) {
-      throw new Error(`no parser marker for the unmapped file: ${r.stderr.trim()}`);
+    // `fast-gate: unmapped:` is a contract with the fleet's log parser, which publishes the
+    // list alongside the cached verdict. Match the path as a whitespace-delimited TOKEN, not
+    // as the whole tail: the marker names EVERY unmapped path, so an exact-string match
+    // breaks the moment a second path is unmapped (which is what AGENTS.md did to it).
+    const marker = r.stderr.match(/^fast-gate: unmapped: (.*)$/m);
+    const named = marker ? marker[1].trim().split(/\s+/) : [];
+    if (!named.includes("UNMAPPED-PROBE.tmp")) {
+      throw new Error(`the parser marker did not name the file: ${r.stderr.trim()}`);
     }
   } finally {
     await Deno.remove(probe);

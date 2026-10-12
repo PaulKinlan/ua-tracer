@@ -5,9 +5,9 @@
     "backfill": "deno run --allow-all --unstable-kv backfill.ts",
     "backfill-verify": "deno run --allow-all --unstable-kv backfill-verified.ts",
 
-    "fmt:check": "deno fmt --check server.ts backfill.ts backfill-verified.ts deno.json tests tools",
-    "lint:check": "deno lint server.ts backfill.ts backfill-verified.ts tests tools",
-    "typecheck": "deno check --unstable-kv server.ts backfill.ts backfill-verified.ts tests/*.ts",
+    "fmt:check": "deno fmt --check server.ts storage.ts bot-verification.ts probes.ts views.ts backfill.ts backfill-verified.ts deno.json tests tools",
+    "lint:check": "deno lint server.ts storage.ts bot-verification.ts probes.ts views.ts backfill.ts backfill-verified.ts tests tools",
+    "typecheck": "deno check --unstable-kv server.ts storage.ts bot-verification.ts probes.ts views.ts backfill.ts backfill-verified.ts tests/*.ts",
     "check:all": "deno task fmt:check && deno task lint:check && deno task typecheck",
 
     "test:file": "deno test --unstable-kv --allow-env",

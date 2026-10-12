@@ -17,21 +17,15 @@ Deno.env.set("DENO_KV_URL", ":memory:");
 // A hosted-KV token would only add a way to get this wrong.
 Deno.env.delete("DENO_KV_ACCESS_TOKEN");
 
-import { getKv, resetBotRangeCache } from "../server.ts";
+import { getKv } from "../storage.ts";
+import { resetBotRangeCache } from "../bot-verification.ts";
 
 /** The process-local in-memory KV this suite file is using. */
 export function testKv(): Promise<Deno.Kv> {
   return getKv();
 }
 
-/**
- * Remove every KV key AND drop server.ts's in-memory range cache.
- *
- * Both are needed: `_rangeCache` is consulted before KV and holds a 24h TTL, so a
- * suite that clears the seeded ranges and then re-classifies would otherwise keep
- * seeing the cleared prefixes. Call this at the start of any test that asserts
- * absolute counts or a bot's classification from a known seed.
- */
+/** Remove every KV key and the bot classifier's in-memory range cache. */
 export async function clearKv(): Promise<void> {
   const kv = await getKv();
   const keys: Deno.KvKey[] = [];

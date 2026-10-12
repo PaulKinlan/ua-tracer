@@ -103,6 +103,32 @@ Deno.test("a storage/entrypoint change runs the HTTP and KV integration suites",
   }
 });
 
+Deno.test("extracted contracts map only to affected fast suites", async () => {
+  const expected: Record<string, string[]> = {
+    "storage.ts": [
+      "tests/unit_keys_test.ts",
+      "tests/kv_behaviour_test.ts",
+      "tests/backfill_test.ts",
+      "tests/backfill_verified_test.ts",
+      "tests/http_test.ts",
+    ],
+    "bot-verification.ts": [
+      "tests/unit_bot_test.ts",
+      "tests/unit_format_test.ts",
+      "tests/backfill_verified_test.ts",
+      "tests/http_test.ts",
+    ],
+    "probes.ts": ["tests/unit_probes_test.ts", "tests/http_test.ts", "tests/kv_behaviour_test.ts"],
+    "views.ts": ["tests/unit_views_test.ts", "tests/unit_format_test.ts", "tests/http_test.ts"],
+  };
+  for (const [path, selected] of Object.entries(expected)) {
+    const got = await suites(["--map", path]);
+    if ([...got].sort().join() !== [...selected].sort().join()) {
+      throw new Error(`${path}: ${got.join()} != ${selected.join()}`);
+    }
+  }
+});
+
 Deno.test("a changed suite runs itself, and shared test code runs everything", async () => {
   if ((await suites(["--map", "tests/http_test.ts"])).join() !== "tests/http_test.ts") {
     throw new Error("a changed suite must map to itself");

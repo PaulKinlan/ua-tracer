@@ -5,7 +5,7 @@
 // newest-first ordering that the pages assume.
 
 import { clearKv, testKv } from "./testenv.ts";
-import { normUa, recentIndexKey, type TraceStats, uaAggKey, uaIndexKey } from "../server.ts";
+import { normUa, recentIndexKey, type TraceStats, uaAggKey, uaIndexKey } from "../storage.ts";
 
 Deno.test("normUa lowercases, trims, and buckets an empty UA", () => {
   if (normUa("  Mozilla/5.0  ") !== "mozilla/5.0") throw new Error(normUa("  Mozilla/5.0  "));

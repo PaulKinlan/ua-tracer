@@ -9,7 +9,7 @@
 // the seeding were wrong (it would surface as "unverified", never as "verified").
 
 import { clearKv, seedBotRanges } from "./testenv.ts";
-import { classifyBot } from "../server.ts";
+import { classifyBot } from "../bot-verification.ts";
 
 // The published-range fixture. Kept in one place because the cache-reset test at
 // the end of this file wipes it and has to restore exactly this set, so the file
@@ -87,6 +87,32 @@ Deno.test("a non-bot user agent classifies as null", async () => {
   for (const ua of ["", "Mozilla/5.0 (X11; Linux) Chrome/120.0.0.0 Safari/537.36", "curl/8.0.1"]) {
     const v = await classifyBot("66.249.66.7", ua);
     if (v !== null) throw new Error(`${JSON.stringify(ua)} -> ${JSON.stringify(v)}`);
+  }
+});
+
+Deno.test("injected dependencies isolate CIDR lookup from default cache", async () => {
+  const kv = await Deno.openKv(":memory:");
+  try {
+    let calls = 0;
+    const deps = {
+      getKv: () => Promise.resolve(kv),
+      now: () => 123456789,
+      fetch: (_input: RequestInfo | URL) => {
+        calls++;
+        return Promise.resolve(
+          new Response(JSON.stringify({
+            prefixes: [{ ipv4Prefix: "192.0.2.0/24" }],
+          })),
+        );
+      },
+    };
+    const first = await classifyBot("192.0.2.7", "Googlebot/2.1", deps);
+    const second = await classifyBot("66.249.66.7", "Googlebot/2.1", deps);
+    if (first?.status !== "verified" || second?.status !== "unverified" || calls !== 1) {
+      throw new Error(`${JSON.stringify(first)} / ${JSON.stringify(second)} / fetches=${calls}`);
+    }
+  } finally {
+    kv.close();
   }
 });
 

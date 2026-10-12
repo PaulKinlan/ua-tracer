@@ -50,6 +50,7 @@ FAST_SUITES=(
   tests/kv_behaviour_test.ts
   tests/backfill_test.ts
   tests/backfill_verified_test.ts
+  tests/cron_test.ts
   tests/http_test.ts
 )
 
@@ -120,6 +121,11 @@ map_one() {
       ;;
     backfill.ts)
       printf '%s\n' tests/backfill_test.ts
+      ;;
+    # Schedules the snapshot repair pass. It is imported by the entrypoint and its
+    # registration is what /api/health reports on, so both suites apply.
+    crons.ts)
+      printf '%s\n' tests/cron_test.ts tests/http_test.ts tests/gate_mapping_test.ts
       ;;
     # Re-tags traces using classifyBot and rewrites the index snapshots, so both
     # the bot contract and the backfill contract apply.

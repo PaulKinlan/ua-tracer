@@ -293,3 +293,34 @@ Deno.test("the injectable CAS deadline cannot quietly replace the production one
     throw new Error("no test injects a deadline; the give-up tests would cost the real 2s");
   }
 });
+
+// The scheduled snapshot repair registers from the entrypoint, and WHERE it registers
+// decides whether the feature works at all (ua-tracer-2t9):
+//  - Deno Deploy discovers Deno.cron() by evaluating the ENTRY module's top-level code,
+//    so the call must be reachable in production;
+//  - a test suite importing server.ts is not the entry module, so inside
+//    `if (import.meta.main)` the call can never happen in a test process - which is what
+//    makes the suites incapable of registering a cron rather than usually harmless.
+// A guard in crons.ts instead would be false in production too (import.meta.main is true
+// only for the entry module) and the job would silently never register, so this asserts
+// the placement, not the intent.
+Deno.test("the cron registration sits inside the entrypoint guard", async () => {
+  const source = await Deno.readTextFile(new URL("../server.ts", import.meta.url));
+  const guard = source.indexOf("if (import.meta.main) {");
+  if (guard < 0) throw new Error("server.ts no longer guards its entrypoint block");
+  const call = source.indexOf("registerRepairCron(");
+  if (call < 0) throw new Error("server.ts no longer registers the repair job");
+  if (call < guard) {
+    throw new Error("the cron registration happens before the entrypoint guard");
+  }
+  const block = source.slice(guard, source.indexOf("\n}", guard));
+  if (!block.includes("registerRepairCron(")) {
+    throw new Error("the cron registration is outside the entrypoint guard");
+  }
+  // And it must not ALSO be registered from the module the entrypoint imports: that
+  // copy would be inert in production and misleading to whoever reads it next.
+  const crons = await Deno.readTextFile(new URL("../crons.ts", import.meta.url));
+  if (/^\s*if \(import\.meta\.main\)/m.test(crons)) {
+    throw new Error("crons.ts guards on import.meta.main, which is false in production");
+  }
+});

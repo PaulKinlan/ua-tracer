@@ -466,7 +466,13 @@ Deno.test("the generated gate evidence stays gitignored, because the derived che
   // walk everything git does not ignore, so if that rule goes away those checks start covering
   // generated files - thousands of them - and their counts stop meaning what the test above assumes.
   const out = await new Deno.Command("git", {
-    args: ["check-ignore", "-q", "artifacts"],
+    // The trailing slash is load-bearing, and ua-tracer-lpz is that bug: .gitignore:20 is
+    // "artifacts/" with a trailing slash, which git treats as DIRECTORY-only. Queried as "artifacts"
+    // while the directory happens to be absent - a clean clone, or a fresh worktree where the
+    // browser gate has not run - git sees a non-directory path, the rule does not match, and it
+    // exits 1, so this test failed for a reason unrelated to what it guards. "artifacts/" asserts
+    // the path is a directory, so the rule matches whether or not the directory exists.
+    args: ["check-ignore", "-q", "artifacts/"],
     cwd: repoRoot,
     stdout: "null",
     stderr: "null",

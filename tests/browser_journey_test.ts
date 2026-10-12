@@ -362,7 +362,13 @@ Deno.test({
             child.kill("SIGKILL");
           }
           await child.status;
-          if (exited) console.log("[browser-journey] Chrome closed over CDP");
+          if (exited) {
+            // Chrome may report its browser PID gone just before its helpers
+            // close inherited heavy-slot fds. Give them a bounded grace period
+            // before this test process exits and releases the wrapper's slot.
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            console.log("[browser-journey] Chrome closed over CDP; helpers settled");
+          }
         } catch {
           /* already gone */
         } finally {

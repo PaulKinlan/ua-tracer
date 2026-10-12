@@ -21,26 +21,38 @@ Both tiers include `deno task check:all` (fmt + lint + typecheck). The full tier
 is the fast tier with every suite, not the affected subset, plus the browser
 journey.
 
-The deployed gate reads its commands from `~/.fleet/check.conf`, which is
-**machine-global** and copied there by the tracked config. The tracked source of
-truth is `tools/check.conf`; `bash tools/check-cmd.sh --install` writes it out (and
-`tools/check-cmd.sh` with no arguments prints the resolved set):
+The deployed gate reads its commands as follows, in this order of preference (do
+not hand-edit the global file, and do not assume it is ours — it is machine-global):
+
+1. **Full tier — nothing to install.** `tools/check.conf` leaves `CHECK_CMD` empty on
+   purpose, so `fleet-check` falls through to its `deno.json` `.tasks.check`
+   auto-detect and runs `deno task check`. That is the durable path: no install, and
+   nothing to lose in a rebuild.
+2. **Fast tier — tracked config plus an install step.** There is no auto-detect for
+   this tier, so it must be named in `tools/check.conf` (the reviewable source of
+   truth) and copied into place:
 
 ```sh
-CHECK_CMD="deno task check"          # every suite + the browser journey
-CHECK_FAST_CMD="deno task check:fast" # fmt/lint/typecheck + affected suites only
+# the values carried by tools/check.conf
+CHECK_CMD=""                          # empty => auto-detect `deno task check`
+CHECK_FAST_CMD="deno task check:fast"  # fmt/lint/typecheck + affected suites only
 CHECK_TIMEOUT=300
 CHECK_FAST_TIMEOUT=60
 ```
 
-`CHECK_CMD` may also be empty: fleet-check then falls through to its
-`deno.json` `.tasks.check` auto-detect, which needs no install step. Either way the
-full tier is the `check` task — `deno task test:full` is an alias kept because the
-hand-off and the VM's current install name it. The fast tier has **no** auto-detect,
-so `check:fast` (`test:fast`) is the only way it reaches the deployed gate. After
-changing the gate, `deno task test:guards` proves the dispatcher and the config
-again — including that an unmapped path still fails closed and that `--install`
-reproduces the tracked values.
+```sh
+# the install step (back the global file up first; it may belong to another project)
+cp -n ~/.fleet/check.conf ~/.fleet/check.conf.bak
+bash tools/check-cmd.sh --install
+```
+
+`tools/check-cmd.sh` with no arguments prints the resolved set, and with a key name
+prints that one value. A per-VM override is sourced second and wins, so a host can
+retune without editing the tracked file. `deno task test:full` / `test:fast` are
+aliases of `check` / `check:fast`, kept because existing installs and hand-offs
+name them. After changing any of this, `deno task test:guards` proves the dispatcher
+and the config again — including that an unmapped path still fails closed and that
+`--install` reproduces the tracked values.
 
 Implementers run `fleet-check --fast`. The **full** gate runs once per landing, on
 the merger's merged union — never from an implementer lane while the merger's gate

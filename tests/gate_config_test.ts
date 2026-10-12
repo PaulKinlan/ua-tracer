@@ -134,29 +134,54 @@ Deno.test("--install replaces a corrupt per-VM file instead of failing on it", a
     if (r.code !== 0) throw new Error(`--install refused a corrupt override: ${r.stderr.trim()}`);
     const written = await Deno.readTextFile(target);
     if (written.includes("unterminated")) throw new Error("the corrupt file survived the install");
-    if (!written.includes('CHECK_CMD="deno task check"')) {
-      throw new Error("the install did not write the tracked command");
+    const installed = parseConf(written);
+    if (installed.get("CHECK_FAST_CMD") !== "deno task check:fast") {
+      throw new Error(`the install did not write the tracked fast command: ${written.trim()}`);
     }
   } finally {
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
 
-Deno.test("the resolver prints a single key, and refuses one it does not know", async () => {
+Deno.test("the resolver prints a single key, an override wins, and an unknown key is refused", async () => {
   // FLEET_CHECK_CONF is always passed: the machine's real ~/.fleet/check.conf belongs to
   // the VM, not to this test, and reading it would make the suite non-hermetic.
   const env = { FLEET_CHECK_CONF: isolatedOverride };
-  const r = await bash(["CHECK_CMD"], env);
-  if (r.code !== 0) throw new Error(`resolver exited ${r.code}: ${r.stderr.trim()}`);
-  if (r.stdout.trim() !== "deno task check") throw new Error(`resolved: ${r.stdout.trim()}`);
-  const list = parseConf((await bash([], env)).stdout);
-  if (list.get("CHECK_FAST_CMD") !== "deno task check:fast") {
-    throw new Error(`resolved set: CHECK_FAST_CMD=${list.get("CHECK_FAST_CMD")}`);
-  }
-  if (list.get("CHECK_TIMEOUT") !== "300" || list.get("CHECK_FAST_TIMEOUT") !== "60") {
+
+  // With no override, the tracked values are what the deployed gate gets: an empty
+  // CHECK_CMD (auto-detect) and the named fast tier.
+  const trackedOnly = parseConf((await bash([], env)).stdout);
+  if (trackedOnly.get("CHECK_CMD") !== "") {
     throw new Error(
-      `resolved budgets: ${list.get("CHECK_TIMEOUT")}/${list.get("CHECK_FAST_TIMEOUT")}`,
+      `expected the full tier to be left to auto-detect, got ${trackedOnly.get("CHECK_CMD")}`,
     );
+  }
+  if (trackedOnly.get("CHECK_FAST_CMD") !== "deno task check:fast") {
+    throw new Error(`resolved CHECK_FAST_CMD=${trackedOnly.get("CHECK_FAST_CMD")}`);
+  }
+  if (
+    trackedOnly.get("CHECK_TIMEOUT") !== "300" ||
+    trackedOnly.get("CHECK_FAST_TIMEOUT") !== "60"
+  ) {
+    throw new Error(
+      `resolved budgets: ${trackedOnly.get("CHECK_TIMEOUT")}/${
+        trackedOnly.get("CHECK_FAST_TIMEOUT")
+      }`,
+    );
+  }
+
+  // A per-VM override is sourced second and wins, which is how a host retunes the gate
+  // without editing the tracked file.
+  const dir = `${repoRoot}/artifacts/gate-config-test`;
+  await Deno.mkdir(dir, { recursive: true });
+  const override = `${dir}/override.conf`;
+  await Deno.writeTextFile(override, 'CHECK_FAST_CMD="deno task test:fast"\n');
+  const withOverride = parseConf((await bash([], { FLEET_CHECK_CONF: override })).stdout);
+  if (withOverride.get("CHECK_FAST_CMD") !== "deno task test:fast") {
+    throw new Error(`the override did not win: ${withOverride.get("CHECK_FAST_CMD")}`);
+  }
+  if ((await bash(["CHECK_TIMEOUT"], env)).stdout.trim() !== "300") {
+    throw new Error("single-key query did not print the tracked value");
   }
   const bad = await bash(["NOT_A_KEY"], env);
   if (bad.code !== 3) throw new Error(`unknown key should exit 3, got ${bad.code}`);

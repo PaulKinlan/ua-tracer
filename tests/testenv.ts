@@ -55,15 +55,16 @@ export async function seedBotRanges(
   }
 }
 
-/** Build a request against the canonical host unless overridden. */
+/**
+ * Build a request. The host lives in the URL (not a header) because the router
+ * reads `url.hostname` for the *.deno.net canonical redirect.
+ */
 export function req(
   path: string,
   init: RequestInit & { host?: string; proto?: string } = {},
 ): Request {
   const { host = "uatracer.com", proto = "https", headers, ...rest } = init;
-  const h = new Headers(headers as HeadersInit | undefined);
-  if (!h.has("host")) h.set("host", host);
-  return new Request(`${proto}://${host}${path}`, { ...rest, headers: h });
+  return new Request(`${proto}://${host}${path}`, { ...rest, headers });
 }
 
 /**

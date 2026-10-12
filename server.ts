@@ -581,6 +581,28 @@ export interface UaAggregate {
   jsRan: number;
 }
 
+// Deadline-bounded compare-and-set retry for the denormalised KV snapshots.
+// `attemptOnce` returns true when it committed (or found nothing to update).
+// The bound is a deadline rather than an attempt count because contention is
+// proportional to the number of concurrent sub-requests for one trace and every
+// CAS loser burns an attempt — a small fixed count silently dropped updates.
+const CAS_DEADLINE_MS = 2000;
+async function casRetry(
+  what: string,
+  attemptOnce: () => Promise<boolean>,
+): Promise<void> {
+  const started = performance.now();
+  for (let attempt = 1;; attempt++) {
+    if (await attemptOnce()) return;
+    if (performance.now() - started > CAS_DEADLINE_MS) {
+      console.warn(`[kv] gave up updating ${what} after ${attempt} attempts`);
+      return;
+    }
+    // Small jittered backoff so the retries do not re-collide in lockstep.
+    await new Promise((r) => setTimeout(r, 1 + Math.random() * 7));
+  }
+}
+
 async function logHit(rec: HitRecord): Promise<void> {
   const kv = await getKv();
   // Sequence per trace so we can list hits in receive order. Use a counter via
@@ -596,19 +618,23 @@ async function logHit(rec: HitRecord): Promise<void> {
   // record to get it.
   if (rec.kind !== "homepage") {
     const trace = await kv.get<TraceRecord>(["trace", rec.id]);
-    if (trace.value) {
-      const recentKey = recentIndexKey(trace.value.ts, rec.id);
-      const uKey = uaIndexKey(trace.value.ua, trace.value.ts, rec.id);
-      const aKey = uaAggKey(trace.value.ua);
+    const tv = trace.value;
+    if (tv) {
+      const recentKey = recentIndexKey(tv.ts, rec.id);
+      const uKey = uaIndexKey(tv.ua, tv.ts, rec.id);
+      const aKey = uaAggKey(tv.ua);
       // Concurrent sub-requests (css-bg, js-ran, font, …) all update the same
-      // stats entry, so use an atomic compare-and-set on the versionstamp with
-      // a small retry loop. A plain get→set races and loses updates (e.g. the
-      // jsRan flag getting clobbered). The same atomic also mirrors the
-      // snapshot to the per-UA index and bumps the per-UA aggregate, so all
-      // three views stay consistent.
-      for (let attempt = 0; attempt < 8; attempt++) {
+      // stats entry, so use an atomic compare-and-set on the versionstamp. A
+      // plain get→set races and loses updates (e.g. the jsRan flag getting
+      // clobbered). The same atomic also mirrors the snapshot to the per-UA
+      // index and bumps the per-UA aggregate, so all three views stay
+      // consistent. Retries are deadline-bounded, not attempt-bounded: a real
+      // browser fires ~12 sub-resources at once, every CAS loser burns an
+      // attempt, and a fixed 8-attempt count silently dropped updates
+      // (measured: 9 of 12 hits recorded).
+      await casRetry(`stats for trace ${rec.id}`, async () => {
         const cur = await kv.get<TraceStats>(recentKey);
-        if (!cur.value) break; // entry not seeded (shouldn't happen)
+        if (!cur.value) return true; // entry not seeded (shouldn't happen)
         const s = cur.value;
         const wasJsRan = s.jsRan;
         s.assetCount += 1;
@@ -618,7 +644,7 @@ async function logHit(rec: HitRecord): Promise<void> {
         // jsRan counter flips exactly once per trace (false -> true).
         const aggCur = await kv.get<UaAggregate>(aKey);
         const agg = aggCur.value ??
-          { ua: trace.value.ua || "(no user-agent)", count: 0, jsRan: 0 };
+          { ua: tv.ua || "(no user-agent)", count: 0, jsRan: 0 };
         const aggNext: UaAggregate = {
           ua: agg.ua,
           count: agg.count,
@@ -631,10 +657,8 @@ async function logHit(rec: HitRecord): Promise<void> {
           .set(uKey, s)
           .set(aKey, aggNext)
           .commit();
-        if (res.ok) break;
-        // Lost the race: brief backoff, then retry with fresh value.
-        await new Promise((r) => setTimeout(r, 5 + attempt * 5));
-      }
+        return res.ok;
+      });
     }
   }
 
@@ -1902,10 +1926,10 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
       .set(recentIndexKey(ts, id), seedStats)
       .set(uaIndexKey(ua, ts, id), seedStats)
       .commit();
-    // Bump the per-UA aggregate (count of homepage traces by this UA). Done
-    // with its own CAS because it is a separate key that many traces share.
+    // Bump the per-UA aggregate (count of homepage traces by this UA). Its own
+    // CAS because it is a separate key that many traces share.
     const aKey = uaAggKey(ua);
-    for (let attempt = 0; attempt < 8; attempt++) {
+    await casRetry(`ua aggregate ${normUa(ua)}`, async () => {
       const aggCur = await kv.get<UaAggregate>(aKey);
       const agg = aggCur.value ??
         { ua: ua || "(no user-agent)", count: 0, jsRan: 0 };
@@ -1913,9 +1937,8 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
         .check({ key: aKey, versionstamp: aggCur.versionstamp })
         .set(aKey, { ua: agg.ua, count: agg.count + 1, jsRan: agg.jsRan })
         .commit();
-      if (res.ok) break;
-      await new Promise((r) => setTimeout(r, 5 + attempt * 5));
-    }
+      return res.ok;
+    });
     // Also log the homepage itself as a hit so the trace waterfall has a root.
     await logHit({ id, kind: "homepage", ts, ua, ip, method: req.method, headers });
 

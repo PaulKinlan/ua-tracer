@@ -1,0 +1,61 @@
+# Production health: the two things a deploy has to produce, checked from OUTSIDE with no
+# credentials. Both are read from the public /api/health, so this workflow cannot rot when a token
+# is rotated and needs nothing from the Deno Deploy console.
+#
+#  1. `build` is present and non-null — the revision serving uatracer.com emits the platform's build
+#     id, i.e. it is a real Deno Deploy revision and not an old one without the field
+#     (deploy-check.ts, ua-tracer-ajc). To prove a SPECIFIC landing rolled, run the same tool with
+#     `--expect <previous build id>`; the id itself is printed below and in the job summary.
+#  2. `repair.expected` is true — ua-tracer-2t9's hourly snapshot repair is REGISTERED in the serving
+#     context. /api/health reports `ok: true` whether or not it is, so without this check an
+#     unregistered cron is invisible from outside (ua-tracer-ruz). UA_TRACER_CRON=1 lives in the
+#     app's Production context on Deno Deploy; the CLI cannot read that context from here.
+#
+# Runs on every push to main (the same push that triggers the deploy) and on demand. Public repo,
+# standard runners, no secrets: nothing here needs a token.
+name: production-health
+
+on:
+  push:
+    branches: [main, fleet/impl-ip-77d]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-health
+  cancel-in-progress: true
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      # Exit 0 once a build id is present; exit 1 when production cannot be shown to be serving one.
+      - name: Production is serving a build (deploy-check.ts)
+        run: deno run --allow-net deploy-check.ts --samples 5 --interval 6
+
+      - name: The hourly snapshot repair is registered and running
+        run: |
+          set -eu
+          body=$(curl -fsS https://uatracer.com/api/health)
+          printf '%s\n' "$body" | jq -e . >/dev/null
+          printf 'build: %s\nrepair: %s\n' "$(printf '%s' "$body" | jq -r '.build // "null"')" "$(printf '%s' "$body" | jq -c '.repair')"
+          expected=$(printf '%s' "$body" | jq -r '.repair.expected')
+          {
+            echo "### Production health"
+            echo ""
+            echo "- build: \`$(printf '%s' "$body" | jq -r '.build // "null"')\`"
+            echo "- repair: \`$(printf '%s' "$body" | jq -c '.repair')\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$expected" != "true" ]; then
+            echo "::error title=Snapshot repair is not registered::/api/health reports repair.expected=${expected}, so the hourly repair (ua-tracer-2t9) will never run and no lastRun will advance. Fix: set UA_TRACER_CRON=1 in the ua-tracer app's Production context on Deno Deploy (ua-tracer-ruz). The variable lives with the app, not with this repo, so a deploy from GitHub does not carry it."
+            exit 1
+          fi

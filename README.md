@@ -167,19 +167,44 @@ table and the measured timings are in [docs/speed.md](docs/speed.md).
 
 ## Deploy
 
-Deployed to Deno Deploy; the entrypoint is `server.ts` (dynamic runtime). The canonical domain is
-**uatracer.com** — requests arriving on the `*.deno.net` deploy host are 301'd there (the health
-check is exempt) so search engines never index the deploy URL.
+Deployed to Deno Deploy from **GitHub**: the app is linked to this repository, so a push to `main`
+builds and deploys, and the canonical domain is **uatracer.com** — requests arriving on the
+`*.deno.net` deploy host are 301'd there (the health check is exempt) so search engines never index
+the deploy URL. The entrypoint is `server.ts` (dynamic runtime). Include `[skip ci]` or
+`[skip deploy]` in a commit message to deploy everything except that commit.
 
-It requires a **Deno KV database provisioned and assigned to the app** — `Deno.openKv()` is not
-auto-available; without it the build fails at the warmup step. Provision and bind it once, then
-deploy from a local checkout:
+Two things must be true for a deploy to be a _working_ production deployment, and neither is visible
+from a green build:
+
+1. **A Deno KV database provisioned and assigned to the app.** `Deno.openKv()` is not
+   auto-available; without it the build fails at the warmup step. This is a one-time, per-app step.
+2. **`UA_TRACER_CRON=1` set in the app's Production context.** Without it [ua-tracer-2t9]'s hourly
+   snapshot repair never registers and `/api/health` still reports `ok: true` — the cron's absence
+   is only visible in the `repair` object (see below). The variable belongs to the _app_, not to
+   this repository, so it travels with the app across deploys; setting it is a console action (or
+   `deno deploy env add UA_TRACER_CRON 1`, which needs a token).
+
+Linking the repository to the app is also a one-time console action (**Deno Deploy → the `ua-tracer`
+app → Git integration → connect `PaulKinlan/ua-tracer`, production branch `main`**). The
+`deno deploy` CLI cannot do it for an app that already exists — it accepts `--owner`/`--repo` only
+when _creating_ an app (`deno deploy create --help`), so a linked app is created by the integration
+or by the console, not adopted afterwards.
+
+### If the link is lost, or for a fresh app
+
+The manual path still works and is what a new app or a re-link needs first:
 
 ```sh
 deno deploy database provision ua-tracer-kv --kind denokv --org <org>
 deno deploy database assign    ua-tracer-kv --org <org> --app ua-tracer
 deno deploy --org <org> --app ua-tracer --prod
 ```
+
+The same CLI is the supported path for automatically deploying a _built_ tree from CI, if a build
+step is ever needed: authenticate with `DENO_DEPLOY_TOKEN` (an organization token is enough) and
+pass `--json --non-interactive` (Deno documents this mode for CI and agents, with stable exit
+codes). That requires a long-lived deploy token in the repository's secrets, which is why the plain
+GitHub integration above is the default — it needs no credential at all.
 
 ## Verifying a deploy
 
@@ -198,6 +223,17 @@ you: a present build id proves a revision that emits the field is serving, **not
 mapping a build id to a commit happens in the Deno Deploy console. An absent or `null` key on a
 readable response means the revision answering predates the field, which is what a lagging or failed
 deploy looks like from outside.
+
+`.github/workflows/production-health.yml` runs those two checks on every push to `main`, with no
+secrets: it requires a build id to be present (`deploy-check.ts`) **and** `repair.expected` to be
+true, and its job summary carries the build id and the whole `repair` object. The second check is
+the one that keeps a silent cron failure loud — it fails, naming the missing `UA_TRACER_CRON=1`,
+rather than reporting the deployment healthy while the hourly repair has never run.
+
+```sh
+curl -fsS https://uatracer.com/api/health | jq '{build, ok, repair}'
+# {"build":"…","ok":true,"repair":{"expected":true,"status":"ok","lastRun":…,"ageMs":…}}
+```
 
 ## License
 

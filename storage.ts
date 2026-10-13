@@ -17,6 +17,20 @@ export async function getKv(): Promise<Deno.Kv> {
   return _kv;
 }
 
+// Public traces must never retain request credentials. Keep ordinary diagnostic
+// headers; mask standard credential names and common custom auth/token/key forms.
+const SENSITIVE_HEADER_NAME =
+  /(?:^|[-_])(?:authorization|auth|cookie2?|set-cookie|api[-_]?key|apikey|token|secret|credential|password|passwd|jwt|session)(?:$|[-_])/i;
+
+export function redactHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([name, value]) => [
+      name,
+      SENSITIVE_HEADER_NAME.test(name) ? "[redacted]" : value,
+    ]),
+  );
+}
+
 export interface TraceRecord {
   id: string;
   ts: number; // ms since epoch (server-receive)
@@ -205,7 +219,7 @@ export async function casRetry(
 export async function seedTrace(rec: TraceRecord, stats: TraceStats): Promise<void> {
   const kv = await getKv();
   await kv.atomic()
-    .set(["trace", rec.id], rec)
+    .set(["trace", rec.id], { ...rec, headers: redactHeaders(rec.headers) })
     .set(recentIndexKey(rec.ts, rec.id), stats)
     .set(uaIndexKey(rec.ua, rec.ts, rec.id), stats)
     .commit();
@@ -270,6 +284,8 @@ function hasHugeHeader(rec: HitRecord): boolean {
 }
 
 function boundRecord(rec: HitRecord, warn: (line: string) => void): HitRecord {
+  // Redact before every storage path, including the oversized-record fallback.
+  rec = { ...rec, headers: redactHeaders(rec.headers) };
   // Cheap first: only hits carrying a client-supplied payload can be large, so the
   // common probe path pays nothing. A long HEADER value is the other way in, and it is
   // the one KV rejects against its own cap without this function ever being asked

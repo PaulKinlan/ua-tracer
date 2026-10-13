@@ -407,6 +407,62 @@ Deno.test("a CSP / Reporting-API report POST is captured on the hit and acked wi
   }
 });
 
+Deno.test("credential headers are redacted before KV writes and on legacy trace pages", async () => {
+  await clearKv();
+  const credentials = {
+    authorization: "Bearer secret-home-token",
+    cookie: "session=secret-cookie-value",
+    "x-api-key": "secret-api-key-value",
+    "x-csrf-token": "secret-csrf-value",
+    "proxy-authorization": "Basic secret-proxy-value",
+    "x-session-id": "secret-session-value",
+  };
+  const { id, secret } = await mint();
+  const kv = await testKv();
+  const homepage = await handler(req("/", { headers: credentials }));
+  if (homepage.status !== 200) throw new Error(`homepage -> ${homepage.status}`);
+  const homepageId = traceIdFromSetCookie(homepage);
+  await homepage.text();
+  if (!homepageId) throw new Error("homepage trace cookie missing");
+  const storedTrace = (await kv.get<TraceRecord>(["trace", homepageId])).value;
+  const homepageHit = (await hitsOf(homepageId)).find((h) => h.kind === "homepage");
+  if (!storedTrace || !homepageHit) throw new Error("homepage records missing");
+  const asset = await handler(req(`/r/${id}/${secret}/style.css`, {
+    headers: { ...credentials, "x-safe-diagnostic": "kept" },
+  }));
+  if (asset.status !== 200) throw new Error(`probe -> ${asset.status}`);
+  await asset.text();
+  const assetHit = (await hitsOf(id)).find((h) => h.kind === "css");
+  if (!assetHit || assetHit.headers["x-safe-diagnostic"] !== "kept") {
+    throw new Error("ordinary diagnostic header was lost");
+  }
+  for (const headers of [storedTrace.headers, homepageHit.headers, assetHit.headers]) {
+    for (const key of Object.keys(credentials)) {
+      if (headers[key] !== "[redacted]") throw new Error(`${key} was stored unredacted`);
+    }
+  }
+
+  // Old KV rows cannot be retroactively unwritten; never expose their values in HTML.
+  const historical = "historical-secret-value";
+  await kv.set(["hit", id, "legacy-credential"], {
+    ...assetHit,
+    headers: {
+      Authorization: historical,
+      COOKIE: historical,
+      "X-Session-Id": historical,
+      "x-safe-diagnostic": "kept",
+    },
+  });
+  const page = await handler(req(`/trace/${id}`));
+  const html = await page.text();
+  if (
+    html.includes(historical) || html.includes("secret-home-token") ||
+    html.includes("secret-api-key-value") || !html.includes("[redacted]")
+  ) {
+    throw new Error("a credential leaked into public trace HTML");
+  }
+});
+
 Deno.test("a timing POST records the client resource entries", async () => {
   await clearKv();
   const { id, secret } = await mint();

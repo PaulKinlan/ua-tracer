@@ -1,5 +1,6 @@
 // Pure HTML rendering; storage and network access belong to the entrypoint.
 import type { BotVerification } from "./bot-verification.ts";
+import { redactHeaders } from "./storage.ts";
 import type { AssetKind, HitRecord, ProbeRecord, TraceRecord, TraceStats } from "./storage.ts";
 import { assetBase } from "./probes.ts";
 
@@ -1055,7 +1056,7 @@ export function traceDetailHtml(trace: TraceRecord, hits: HitRecord[]): string {
   <td colspan="5">
     <details>
       <summary>request headers (${Object.keys(h.headers).length})</summary>
-      <pre class="headers">${escapeHtml(JSON.stringify(h.headers, null, 2))}</pre>
+      <pre class="headers">${escapeHtml(JSON.stringify(redactHeaders(h.headers), null, 2))}</pre>
     </details>
   </td>
 </tr>`;

@@ -56,10 +56,10 @@ also hits `css-bg.png` / `css-font.woff2` / `import.css`. A UA that parses the m
 LinkedInBot) tend to fetch the `og:image` / `twitter:image`. Only a UA that runs JavaScript ever
 hits `js-ran.gif` / `module-ran.gif` or posts to `timing`.
 
-Each endpoint logs the hit (trace id, asset kind, UA, IP, method, full request headers, server
-timestamp) to **Deno KV**, then serves a real, valid response of the correct content-type (real
-CSS/JS, a real PNG/GIF, a real woff2 — all generated/embedded with `TextEncoder` / `Uint8Array` /
-`atob`, no Node `Buffer`).
+Each endpoint logs the hit (trace id, asset kind, UA, IP, method, request headers with
+credential-bearing values redacted, server timestamp) to **Deno KV**, then serves a real, valid
+response of the correct content-type (real CSS/JS, a real PNG/GIF, a real woff2 — all
+generated/embedded with `TextEncoder` / `Uint8Array` / `atob`, no Node `Buffer`).
 
 ## Is it really that bot? (IP-range verification)
 
@@ -97,8 +97,8 @@ them), so they reveal which agents probe for agent-directive files — and which
   `?ua=<substring>`, `?js=1` (only traces where JS ran), and `?path=<path>` (the `#unsolicited`
   well-known log); `#by-user-agent` is the per-UA aggregate, paginated via `?uap=` / `?p=`.
 - **`/trace/{id}`** — full detail for one homepage hit: a server-side waterfall of every sub-request
-  in receive order (delta-ms from the homepage hit, asset kind, UA, headers), a summary of which
-  asset _types_ were fetched, whether CSS-linked resources / the iframe were followed, whether
+  in receive order (delta-ms from the homepage hit, asset kind, UA, redacted headers), a summary of
+  which asset _types_ were fetched, whether CSS-linked resources / the iframe were followed, whether
   classic JS and ES modules executed, the bot verification, and — if JS ran — the client-side
   resource-timing waterfall the page posted back.
 - **`/api/health`** — `{ "ok": true, "ts": …, "build": … }`, where `build` is the Deno Deploy build
@@ -125,7 +125,7 @@ them), so they reveal which agents probe for agent-directive files — and which
 State lives entirely in Deno KV (Deno Deploy isolates restart frequently — never in-memory maps):
 
 ```
-["trace",  id]                 -> homepage TraceRecord (UA, IP, full headers, verification)
+["trace",  id]                 -> homepage TraceRecord (UA, IP, redacted headers, verification)
 ["hit",    id, tsKey]          -> each asset HitRecord (listed in receive order)
 ["recent", reverseTsKey, id]   -> recent-traces index; value is a denormalized TraceStats
                                   snapshot (asset count, jsRan, kinds) so the browse list and the

@@ -427,6 +427,72 @@ Deno.test("a timing POST records the client resource entries", async () => {
   if (hit?.timing?.length !== 2) throw new Error(`timing not stored: ${JSON.stringify(hit)}`);
 });
 
+Deno.test("hostile forwarded origin cannot poison social metadata or inject HTML", async () => {
+  await clearKv();
+  const host = 'safe.test"><img src=x onerror=alert(3)>';
+  const proto = 'https"><img src=x onerror=alert(4)>';
+  const res = await handler(req("/", {
+    headers: { "x-forwarded-host": host, "x-forwarded-proto": proto },
+  }));
+  if (res.status !== 200) throw new Error(`homepage -> ${res.status}`);
+  const html = await res.text();
+  for (
+    const meta of [
+      '<meta property="og:url" content="https://uatracer.com/">',
+      '<meta property="og:image" content="https://uatracer.com/r/',
+      '<meta name="twitter:image" content="https://uatracer.com/r/',
+    ]
+  ) {
+    if (!html.includes(meta)) throw new Error(`canonical social metadata missing: ${meta}`);
+  }
+  if (
+    html.includes(host) || html.includes(proto) ||
+    !html.includes("safe.test&quot;&gt;&lt;img src=x onerror=alert(3)&gt;") ||
+    !html.includes("https&quot;&gt;&lt;img src=x onerror=alert(4)&gt;")
+  ) {
+    throw new Error("forwarded origin was not safely escaped outside metadata");
+  }
+});
+
+Deno.test("client timing initiatorType is text, not HTML, on the trace page", async () => {
+  await clearKv();
+  const { id, secret } = await mint();
+  const payload = '<img src=x onerror="alert(1)">';
+  const quotePayload = '"><img src=x onerror=alert(2)>';
+  const posted = await handler(req(`/r/${id}/${secret}/timing`, {
+    method: "POST",
+    body: JSON.stringify({
+      entries: [{
+        name: "safe.css",
+        entryType: "resource",
+        startTime: 1,
+        duration: 2,
+        initiatorType: payload,
+      }, {
+        name: "quote.css",
+        entryType: "resource",
+        startTime: 3,
+        duration: 4,
+        initiatorType: quotePayload,
+      }],
+    }),
+  }));
+  if (posted.status !== 200) throw new Error(`timing POST -> ${posted.status}`);
+  await posted.text();
+
+  const page = await handler(req(`/trace/${id}`));
+  if (page.status !== 200) throw new Error(`trace page -> ${page.status}`);
+  const html = await page.text();
+  if (!html.includes("safe.css")) throw new Error("timing entry missing from waterfall");
+  if (
+    html.includes(payload) || html.includes(quotePayload) ||
+    !html.includes("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;") ||
+    !html.includes("&quot;&gt;&lt;img src=x onerror=alert(2)&gt;")
+  ) {
+    throw new Error("initiatorType was not rendered as escaped text");
+  }
+});
+
 Deno.test("an unparseable timing body is ignored rather than fatal", async () => {
   await clearKv();
   const { id, secret } = await mint();

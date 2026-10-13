@@ -590,12 +590,12 @@ export function homepageHtml(opts: HomepageOpts): string {
 <meta property="og:title" content="ua-tracer">
 <meta property="og:description" content="See what a user agent downloads, follows, and executes.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="${origin}${base}/og-image.png">
-<meta property="og:url" content="${origin}/">
+<meta property="og:image" content="${CANONICAL_ORIGIN}${base}/og-image.png">
+<meta property="og:url" content="${CANONICAL_ORIGIN}/">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="ua-tracer">
 <meta name="twitter:description" content="See what a user agent downloads, follows, and executes.">
-<meta name="twitter:image" content="${origin}${base}/twitter-image.png">
+<meta name="twitter:image" content="${CANONICAL_ORIGIN}${base}/twitter-image.png">
 `;
   // Homepage shows a bounded preview (paging lives on /traces, which does not
   // mint a trace on each navigation).
@@ -1075,7 +1075,7 @@ export function traceDetailHtml(trace: TraceRecord, hits: HitRecord[]): string {
   <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${
         escapeHtml(e.name)
       }">${escapeHtml(name)}</td>
-  <td class="mono">${e.initiatorType ?? ""}</td>
+  <td class="mono">${escapeHtml(e.initiatorType ?? "")}</td>
   <td class="mono">${e.startTime.toFixed(0)}ms</td>
   <td class="mono">${e.duration.toFixed(0)}ms</td>
   <td style="width:620px"><span class="bar" style="margin-left:${left}px;width:${width}px"></span></td>

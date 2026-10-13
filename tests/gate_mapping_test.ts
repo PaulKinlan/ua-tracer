@@ -677,6 +677,77 @@ Deno.test("no --ignore entry in the check tasks masks a file git tracks", async 
   }
 });
 
+Deno.test("the fmt:check step itself goes red on an unformatted file it checks", async () => {
+  // ua-tracer-lvy: the count assertion above is a COVERAGE guard - it parses the count and is
+  // deliberately green while a file is unformatted; the red for that case comes from the gate's
+  // own fmt:check step. Nothing pinned that (measured: no suite runs check:all or asserts a
+  // nonzero exit on an unformatted file), so the guarantee lived in manual mutations only.
+  //
+  // The probe is UNTRACKED, at a mapped path, and that is a measured design decision, not a
+  // convenience. Premise, measured on this tree: the task derives its set by FILESYSTEM WALK -
+  // with an untracked, unignored, unformatted docs/fmt-pin-probe.md present, `deno task
+  // fmt:check` exits 1 reporting 'Found 1 not formatted file in 29 files' and NAMES the probe;
+  // removed, it exits 0 with 'Checked 28 files'. A git-derived set (ls-files) would never have
+  // seen the probe at all - the original .beads/ bug is the same walk seen from the other side.
+  // A tracked file differs from this probe only through ignore rules, and THOSE are already
+  // pinned independently: the by-name guard above (--ignore entries) and the gitignore-masking
+  // guard below. So this pin owns detection, those own exclusion, and together they are the
+  // property 'an unformatted file the repo ships cannot pass the gate'.
+  //
+  // Why an untracked probe and not the alternatives (the v1 defect is in bd remember): a
+  // tracked-file mutation cannot coexist with the gate's witness, which attests tracked files'
+  // ctime - the v1 pin rewrote README.md inside the gate's own run and marked its own verdict
+  // STALE three consecutive times on a quiet tree. An untracked file is explicitly NOT
+  // witnessed, and this test touches nothing tracked, so it cannot invalidate any verdict.
+  // A tautology was the other rejected end: asserting on the task STRING (it contains --check)
+  // would pin words, not behaviour. This pin runs the real task and asserts its behaviour -
+  // a fmt that ignores everything, or a task that lost --check, stays green and goes red here.
+  const probe = `${repoRoot}/docs/fmt-pin-probe.md`;
+  let exists = true;
+  try {
+    await Deno.stat(probe);
+  } catch {
+    exists = false;
+  }
+  if (exists) {
+    // Not this test's mess: a killed run may have left the probe behind. It stays visible in
+    // git status and the gate's own fmt step goes red naming it, so the failure surfaces either
+    // way; recreating over it would only hide which run left it.
+    return;
+  }
+  try {
+    // Unformatted on purpose: runs of spaces that fmt collapses (the same mutation measured
+    // manually and in the premise above).
+    await Deno.writeTextFile(
+      probe,
+      "# fmt pin probe\n\nthis   is   not   formatted\n",
+    );
+    const out = await new Deno.Command("deno", {
+      args: ["task", "fmt:check"],
+      cwd: repoRoot,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const text = new TextDecoder().decode(out.stdout) + new TextDecoder().decode(out.stderr);
+    if (out.code === 0) {
+      throw new Error("fmt:check stayed green on an unformatted file it checks");
+    }
+    // Wording kept loose on purpose: assert the fact (unformatted files reported), not a
+    // sentence deno may reword.
+    if (!/not formatted/i.test(text)) {
+      throw new Error(
+        `fmt:check exited ${out.code} but never reported unformatted files: ${
+          text.trim().slice(-200)
+        }`,
+      );
+    }
+  } finally {
+    // No residue: the probe is removed even on failure, and it was this test's own file -
+    // nothing tracked, nothing shared, nothing witnessed.
+    await Deno.remove(probe).catch(() => {});
+  }
+});
+
 Deno.test("no tracked file deno would format is hidden from it by .gitignore", async () => {
   // `git add -f` on generated evidence is the quiet version of this: the file is in the repository,
   // so it looks covered, but deno skips it because an ignore rule matches, and the gate's fmt step

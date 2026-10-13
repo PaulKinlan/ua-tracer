@@ -49,7 +49,8 @@ value. A per-VM override is sourced second and wins, so a host can retune withou
 tracked file. `deno task test:full` / `test:fast` are aliases of `check` / `check:fast`, kept
 because existing installs and hand-offs name them. After changing any of this,
 `deno task test:guards` proves the dispatcher and the config again — including that an unmapped path
-still fails closed and that `--install` reproduces the tracked values.
+still fails closed, that `--install` reproduces the tracked values, and that every `deno task` name
+these docs tell a reader to run exists in `deno.json`.
 
 Implementers run `fleet-check --fast`. The **full** gate runs once per landing, on the merger's
 merged union — never from an implementer lane while the merger's gate is queued (one heavy slot per

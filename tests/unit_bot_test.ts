@@ -78,6 +78,39 @@ Deno.test("bots that publish no ranges are unverifiable, not unverified", async 
   }
 });
 
+Deno.test("a claimed bot with no trusted address is unverifiable, never a spoof", async () => {
+  // `null` = the runtime reported no connection peer. Naming the family is still
+  // useful; asserting a verdict is not. The ranges are also not consulted: they
+  // cannot change the answer, so a lookup here would be a request-path cost and a
+  // dependency for nothing.
+  const kv = await Deno.openKv(":memory:");
+  try {
+    let kvReads = 0;
+    let fetches = 0;
+    const v = await classifyBot(null, "Mozilla/5.0 (compatible; Googlebot/2.1)", {
+      getKv: () => {
+        kvReads++;
+        return Promise.resolve(kv);
+      },
+      fetch: ((_input: RequestInfo | URL) => {
+        fetches++;
+        return Promise.resolve(new Response("{}"));
+      }) as typeof fetch,
+    });
+    if (v?.bot !== "Googlebot" || v.status !== "unverifiable") {
+      throw new Error(JSON.stringify(v));
+    }
+    if (!v.note.includes("no trusted client address")) throw new Error(v.note);
+    if (kvReads !== 0 || fetches !== 0) {
+      throw new Error(
+        `looked up ranges for an address we never had: kv=${kvReads} fetch=${fetches}`,
+      );
+    }
+  } finally {
+    kv.close();
+  }
+});
+
 Deno.test("Applebot resolves against Apple's published ranges", async () => {
   const v = await classifyBot("17.241.208.20", "Mozilla/5.0 (compatible; Applebot/0.1)");
   if (v?.bot !== "Applebot" || v.status !== "verified") throw new Error(JSON.stringify(v));

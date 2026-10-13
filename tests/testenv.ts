@@ -58,6 +58,18 @@ export async function seedBotRanges(
 }
 
 /**
+ * Connection metadata as `Deno.serve` supplies it: the peer address the runtime
+ * accepted the connection from. Tests pass this instead of pretending a
+ * forwarding header is the client — a header is client-controlled text.
+ */
+export function connInfo(hostname: string): Deno.ServeHandlerInfo {
+  return {
+    remoteAddr: { transport: "tcp", hostname, port: 443 } as Deno.NetAddr,
+    completed: Promise.resolve(),
+  };
+}
+
+/**
  * Build a request. The host lives in the URL (not a header) because the router
  * reads `url.hostname` for the *.deno.net canonical redirect.
  */

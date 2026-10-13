@@ -128,17 +128,31 @@ async function getBotRanges(
   return prefixes;
 }
 
-// Classify a request by IP + UA. Returns null for non-bot UAs.
+// Classify a request by client IP + UA. `ip` must be the trusted client address
+// (the connection peer). `null` means the runtime reported no peer: the claimed
+// bot is then UNVERIFIABLE, not unverified — an address we never had is not
+// evidence of spoofing, and a forwarding header is not evidence at all (see
+// `clientIp`/`peerIp` in server.ts). Returns null for non-bot UAs.
 export async function classifyBot(
-  ip: string,
+  ip: string | null,
   ua: string,
   deps: BotDependencies = {},
 ): Promise<BotVerification | null> {
-  const ipNorm = ip.replace(/^::ffff:/, "").trim();
+  const ipNorm = ip === null ? null : ip.replace(/^::ffff:/, "").trim();
   const uaLower = (ua || "").toLowerCase();
 
   for (const source of BOT_RANGE_SOURCES) {
     if (source.uaMatches.some((m) => uaLower.includes(m.toLowerCase()))) {
+      if (ipNorm === null) {
+        // No address to check against: naming the family is still useful, but a
+        // verdict is not ours to give. No range fetch either — the answer cannot
+        // depend on the ranges.
+        return {
+          bot: source.name,
+          status: "unverifiable",
+          note: `no trusted client address was available to check ${source.name} ranges`,
+        };
+      }
       const ranges = await getBotRanges(source, deps);
       const ipInt = ipv4ToInt(ipNorm);
       const inRange = ipInt !== null &&

@@ -6,8 +6,10 @@
 
 import {
   clearKv,
+  connInfo,
   countPrefix,
   req,
+  seedBotRanges,
   testKv,
   traceBaseFromHtml,
   traceIdFromSetCookie,
@@ -26,12 +28,28 @@ import {
 
 const UA = "TestAgent/1.0";
 const IP = "203.0.113.7";
+// A Googlebot address inside the published range fixture, and the client's own
+// claim about itself. Tests hand the peer to the handler and the claim to the
+// request, so a verdict taken from the wrong one shows up as a wrong badge.
+const GOOGLE_IP = "66.249.66.1";
+const SPOOFED_IP = "198.51.100.99";
+// The classic spoof: the client prepends its fabricated hop, so the header is a
+// chain and the Google address is the LEFTMOST entry.
+const SPOOF_CHAIN = `${GOOGLE_IP}, ${SPOOFED_IP}, 10.0.0.1`;
+const GOOGLEBOT_UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+const GOOGLE_RANGES = { Googlebot: ["66.249.64.0/19"] };
 
-/** Mint a trace through the real homepage and dig the probe base out of it. */
-async function mint(ua = UA, ip = IP) {
-  const res = await handler(
-    req("/", { headers: { "user-agent": ua, "x-forwarded-for": ip } }),
-  );
+/**
+ * Mint a trace through the real homepage and dig the probe base out of it. The IP
+ * is the connection peer (as `Deno.serve` reports it) and the request claims a
+ * different address in a header, so anything downstream that reads the header
+ * instead of the peer shows up as a wrong recorded IP or a forged verdict.
+ * `claimedIps` is what the request says about itself; null sends no header.
+ */
+async function mint(ua = UA, ip = IP, claimedIps: string | null = SPOOFED_IP) {
+  const headers: Record<string, string> = { "user-agent": ua };
+  if (claimedIps !== null) headers["x-forwarded-for"] = claimedIps;
+  const res = await handler(req("/", { headers }), connInfo(ip));
   const html = await res.text();
   return { res, html, ...traceBaseFromHtml(html) };
 }
@@ -75,6 +93,75 @@ Deno.test("GET / mints a trace, gates the probe base with a secret, sets the coo
   if (root.length !== 1 || root[0].kind !== "homepage") {
     throw new Error(`expected one homepage hit, got ${JSON.stringify(root.map((h) => h.kind))}`);
   }
+});
+
+Deno.test("a spoofed x-forwarded-for cannot turn a claimed bot into a verified one", async () => {
+  await clearKv();
+  await seedBotRanges(GOOGLE_RANGES);
+  // The request claims a Google address in the header; the connection came from
+  // the test peer, which is not in any published range.
+  const { html, id } = await mint(GOOGLEBOT_UA, IP);
+  const kv = await testKv();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+  if (trace.ip !== IP) throw new Error(`recorded the claimed address: ${trace.ip}`);
+  if (trace.verified?.status !== "unverified") {
+    throw new Error(`spoofed header decided the verdict: ${JSON.stringify(trace.verified)}`);
+  }
+  // The badge is what the bug forged, so assert on the rendered page.
+  if (html.includes("✓ Googlebot")) throw new Error("the homepage still shows a verified badge");
+  if (!html.includes("fake Googlebot")) throw new Error("no spoof warning on the homepage");
+  const detail = await (
+    await handler(req(`/trace/${id}`), connInfo(IP))
+  ).text();
+  if (detail.includes("✓ verified")) throw new Error("the trace page still shows a verified badge");
+});
+
+Deno.test("a fabricated leftmost hop in an x-forwarded-for chain is not evidence either", async () => {
+  await clearKv();
+  await seedBotRanges(GOOGLE_RANGES);
+  // Three hops, the Google address first — what a proxy chain looks like when the
+  // client prepends its own entry. Still not the peer, so still not a verdict.
+  const { html, id } = await mint(GOOGLEBOT_UA, IP, SPOOF_CHAIN);
+  const kv = await testKv();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+  if (trace.ip !== IP) throw new Error(`recorded a hop from the chain: ${trace.ip}`);
+  if (trace.verified?.status !== "unverified") {
+    throw new Error(`a chain hop decided the verdict: ${JSON.stringify(trace.verified)}`);
+  }
+  if (html.includes("✓ Googlebot")) throw new Error("a chain hop minted a verified badge");
+});
+
+Deno.test("with no connection metadata a claimed bot is unverifiable, not a spoof", async () => {
+  await clearKv();
+  await seedBotRanges(GOOGLE_RANGES);
+  // No `info` at all: there is no address we are allowed to check. The claim in
+  // the header must not become a verdict, and its absence of a peer must not
+  // become a spoof accusation — "unverifiable" is the distinct, honest state.
+  const res = await handler(
+    req("/", { headers: { "user-agent": GOOGLEBOT_UA, "x-forwarded-for": SPOOF_CHAIN } }),
+  );
+  const html = await res.text();
+  const id = traceIdFromSetCookie(res)!;
+  const kv = await testKv();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+  if (trace.verified?.bot !== "Googlebot" || trace.verified.status !== "unverifiable") {
+    throw new Error(`expected unverifiable: ${JSON.stringify(trace.verified)}`);
+  }
+  if (html.includes("✓ Googlebot")) throw new Error("a header decided the verdict with no peer");
+  if (html.includes("fake Googlebot")) throw new Error("a missing peer was reported as a spoof");
+});
+
+Deno.test("a peer inside the published range still verifies, with no header at all", async () => {
+  await clearKv();
+  await seedBotRanges(GOOGLE_RANGES);
+  const { html, id } = await mint(GOOGLEBOT_UA, GOOGLE_IP, null);
+  const kv = await testKv();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+  if (trace.ip !== GOOGLE_IP) throw new Error(`recorded ip ${trace.ip}`);
+  if (trace.verified?.bot !== "Googlebot" || trace.verified.status !== "verified") {
+    throw new Error(`a real bot lost its verdict: ${JSON.stringify(trace.verified)}`);
+  }
+  if (!html.includes("✓ Googlebot")) throw new Error("the verified badge is missing");
 });
 
 Deno.test("the homepage links direct assets and no CSS/JS-only probe", async () => {

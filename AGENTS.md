@@ -146,8 +146,12 @@ Two things a lane must not break:
   is captured under `["x-report-body", …]`.
 - Every asset/probe hit is recorded with the UA, IP, headers and server timestamp; a bot hit is
   tagged **verified** (UA claims bot X and the IP is inside X's published range), **unverified**
-  (claims X, IP is not — a spoof) or **unverifiable** (X publishes no ranges). A range source that
-  cannot be resolved must classify as _unverified/unverifiable_, never _verified_.
+  (claims X, the checked IP is not — a spoof) or **unverifiable** (X publishes no ranges, or no
+  trusted client address could be established). The address that decides a verdict is the connection
+  peer from Deno's `info.remoteAddr`, never a forwarding header: Deno Deploy sets no forwarding
+  header of its own, so a client-supplied `x-forwarded-for` arrives verbatim (leftmost _and_
+  rightmost hop) and is recorded for context but never trusted. A range source that cannot be
+  resolved must classify as _unverified/unverifiable_, never _verified_.
 - `*.deno.net` / `*.deno.dev` → `301` to the canonical origin; `/api/health` is exempt so uptime
   monitors are not redirected.
 - `HEAD` must return the same headers as `GET` with an empty body.

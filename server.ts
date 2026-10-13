@@ -55,14 +55,39 @@ import { registerRepairCron, repairHealth } from "./crons.ts";
 
 // Request helpers and HTTP routes; persistence, bot checks, probe payloads,
 // and HTML rendering are owned by their respective modules.
-export function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
-  // Deno Deploy sets x-forwarded-for; fall back to remote addr.
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) return xff.split(",")[0].trim();
-  const real = req.headers.get("x-real-ip");
-  if (real) return real;
+
+// `::ffff:1.2.3.4` -> `1.2.3.4`, anything else unchanged. The runtime reports
+// IPv4 peers IPv4-mapped over IPv6; classifyBot applies the same normalisation
+// for its own direct callers.
+function unmapIpv4(ip: string): string {
+  return ip.replace(/^::ffff:/, "");
+}
+
+// The connection peer: the address the runtime accepted the TCP connection from.
+// It is the one client address nobody can choose for themselves, so it is the
+// only value a bot-verification verdict may be based on.
+function peerIp(info?: Deno.ServeHandlerInfo): string | null {
   const addr = info?.remoteAddr;
-  if (addr && addr.transport === "tcp") return addr.hostname;
+  if (!addr || addr.transport !== "tcp") return null;
+  return unmapIpv4(addr.hostname);
+}
+
+// The IP recorded against a request and written to the logs: the connection peer
+// when the runtime gave us one, otherwise whatever the request claims about
+// itself (x-forwarded-for, then x-real-ip) so a handler called without connection
+// metadata still records something. Deno Deploy adds no forwarding header of its
+// own — measured on the live deployment 2026-10-13: a request sending none
+// arrives with none, and a client-supplied x-forwarded-for arrives verbatim, so
+// neither the first nor the last element of a chain is platform-set — therefore a
+// claimed address is client-controlled text. It may be recorded; it must never
+// decide a verdict. `handleHomepage` takes its verification IP from `peerIp`.
+export function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
+  const peer = peerIp(info);
+  if (peer) return peer;
+  const xff = req.headers.get("x-forwarded-for");
+  if (xff) return unmapIpv4(xff.split(",")[0].trim());
+  const real = req.headers.get("x-real-ip");
+  if (real) return unmapIpv4(real.trim());
   return "unknown";
 }
 
@@ -463,7 +488,11 @@ async function handleAsset(
   }
 }
 
-async function handleHomepage(req: Request, ip: string): Promise<Response> {
+async function handleHomepage(
+  req: Request,
+  ip: string,
+  trustedIp: string | null,
+): Promise<Response> {
   const ua = req.headers.get("user-agent") ?? "";
   const headers = headersToObject(req.headers);
   // Derive the public origin for copy-pasteable examples. Honour the proxy's
@@ -504,8 +533,10 @@ async function handleHomepage(req: Request, ip: string): Promise<Response> {
     const ts = Date.now();
     // IP-range verification against published bot ranges (Google, OpenAI,
     // Bing). ClaudeBot/ChatGPT-User publish no ranges and are tagged
-    // "unverifiable" — their UA is unfalsifiable.
-    const verified = await classifyBot(ip, ua);
+    // "unverifiable" — their UA is unfalsifiable. The IP is `trustedIp`, the
+    // connection peer, or null when the runtime reported none: the client must
+    // not be able to mint its own verdict from a header it wrote itself.
+    const verified = await classifyBot(trustedIp, ua);
     const rec: TraceRecord = {
       id,
       ts,
@@ -875,7 +906,7 @@ async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise
 
   // Homepage.
   if (path === "/" && (req.method === "GET" || req.method === "HEAD")) {
-    return await handleHomepage(req, ip);
+    return await handleHomepage(req, ip, peerIp(info));
   }
 
   const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? url.host;

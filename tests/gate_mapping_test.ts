@@ -645,6 +645,38 @@ Deno.test("the files the fmt:check task checks cover every tracked file of the k
   }
 });
 
+Deno.test("no --ignore entry in the check tasks masks a file git tracks", async () => {
+  // ua-tracer-hae: the count assertion above compares deno's walk (through the task the gate runs)
+  // with git's view, so a --ignore that drops a tracked file moves the count - but only in NET: a
+  // masked tracked file can be cancelled out by an extra file the task checks that git refuses to
+  // list (an uncovered info/exclude path). deno prints a count, not the list of files it checked,
+  // so the count cannot name names; the declared entries can. Each --ignore in fmt:check and
+  // lint:check is therefore checked BY NAME against the tracked set - an entry that matches a
+  // tracked file is masking it from the gate's verdict no matter what the count says. Prefix
+  // semantics cover every entry this repo declares (plain paths, no globs); a future glob entry
+  // would under-match here, but it would still move the count above.
+  const cfg = JSON.parse(await Deno.readTextFile(new URL("../deno.json", import.meta.url)));
+  const tasks: Record<string, string> = cfg.tasks ?? {};
+  const tracked = await gitLines(["ls-files"]);
+  const offenders: string[] = [];
+  for (const name of ["fmt:check", "lint:check"]) {
+    const cmd = tasks[name];
+    if (typeof cmd !== "string") throw new Error(`deno.json has no ${name} task`);
+    for (const entry of cmd.matchAll(/--ignore=([^\s"']+)/g)) {
+      const ignored = entry[1];
+      const masked = tracked.filter((f) => f === ignored || f.startsWith(`${ignored}/`));
+      for (const f of masked) offenders.push(`${name}'s --ignore=${ignored} masks tracked ${f}`);
+    }
+  }
+  if (offenders.length) {
+    throw new Error(
+      `the check tasks declare ignores that hide tracked files from the gate's verdict: ${
+        offenders.slice(0, 5).join("; ")
+      }${offenders.length > 5 ? ` (+${offenders.length - 5} more)` : ""}`,
+    );
+  }
+});
+
 Deno.test("no tracked file deno would format is hidden from it by .gitignore", async () => {
   // `git add -f` on generated evidence is the quiet version of this: the file is in the repository,
   // so it looks covered, but deno skips it because an ignore rule matches, and the gate's fmt step

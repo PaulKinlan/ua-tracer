@@ -21,23 +21,24 @@ top-level `.ts` module is missing from either, which is how `crons.ts` went unme
 for as long as it existed (ua-tracer-qir). Do not mirror the tree by hand elsewhere — a refactor
 moves modules and must update the map rather than silently making this page false.
 
-| Path                                  | What it is                                                                                                                                               |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server.ts`                           | The entrypoint: routing, request/response semantics, the probe-hit write path, `handler`, `Deno.serve`.                                                  |
-| `storage.ts`                          | The stable KV schema and trace/probe persistence (key builders, `getKv()`, `casRetry`, listing). No HTTP entrypoint imports.                             |
-| `bot-verification.ts`                 | Published bot CIDR verification and the `verified` / `unverified` / `unverifiable` verdict; range fetch + cache.                                         |
-| `probes.ts`                           | The probe URL contract and the generated resource bodies (CSS/JS/PNG/GIF/woff2/manifest/iframe).                                                         |
-| `views.ts`                            | Pure HTML rendering for the pages; storage and network access belong to the entrypoint.                                                                  |
-| `crons.ts`                            | The scheduled snapshot-repair pass: its `Deno.cron` registration from the entrypoint, the run record it writes, and what `/api/health` reports about it. |
-| `backfill.ts`, `backfill-verified.ts` | One-off maintenance over stored traces (`deno task backfill`, `backfill-verify`); both importable, bodies under `import.meta.main`.                      |
-| `tools/fast-gate.sh`                  | The affected-path dispatcher. **The only place the path→suite map exists.**                                                                              |
-| `tools/full-gate.sh`                  | Thin wrapper: `fast-gate.sh --all-suites`.                                                                                                               |
-| `tools/check.conf`                    | Tracked gate commands + budgets (source of truth for the VM config).                                                                                     |
-| `tools/check-cmd.sh`                  | Prints the resolved gate values; `--install` writes `~/.fleet/check.conf`.                                                                               |
-| `tests/`                              | The suites, plus `tests/testenv.ts` (redirects `Deno.openKv` to `:memory:`).                                                                             |
-| `docs/speed.md`                       | Budgets, mapping table, hermeticity rules, measured timings.                                                                                             |
-| `artifacts/`                          | Gitignored browser-journey output (screenshot, `summary.json`, Chrome profile).                                                                          |
-| `AGENTS.md`                           | This file — the durable rules, not a mirror of the tree.                                                                                                 |
+| Path                                  | What it is                                                                                                                                                                                         |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server.ts`                           | The entrypoint: routing, request/response semantics, the probe-hit write path, `handler`, `Deno.serve`.                                                                                            |
+| `storage.ts`                          | The stable KV schema and trace/probe persistence (key builders, `getKv()`, `casRetry`, listing). No HTTP entrypoint imports.                                                                       |
+| `bot-verification.ts`                 | Published bot CIDR verification and the `verified` / `unverified` / `unverifiable` verdict; range fetch + cache.                                                                                   |
+| `probes.ts`                           | The probe URL contract and the generated resource bodies (CSS/JS/PNG/GIF/woff2/manifest/iframe).                                                                                                   |
+| `views.ts`                            | Pure HTML rendering for the pages; storage and network access belong to the entrypoint.                                                                                                            |
+| `crons.ts`                            | The scheduled snapshot-repair pass: its `Deno.cron` registration from the entrypoint, the run record it writes, and what `/api/health` reports about it.                                           |
+| `backfill.ts`, `backfill-verified.ts` | One-off maintenance over stored traces (`deno task backfill`, `backfill-verify`); both importable, bodies under `import.meta.main`.                                                                |
+| `deploy-check.ts`                     | Standalone deploy verification (`deno run --allow-net deploy-check.ts`, ua-tracer-ajc): samples `/api/health` and says whether a revision carrying the build field is serving. Nothing imports it. |
+| `tools/fast-gate.sh`                  | The affected-path dispatcher. **The only place the path→suite map exists.**                                                                                                                        |
+| `tools/full-gate.sh`                  | Thin wrapper: `fast-gate.sh --all-suites`.                                                                                                                                                         |
+| `tools/check.conf`                    | Tracked gate commands + budgets (source of truth for the VM config).                                                                                                                               |
+| `tools/check-cmd.sh`                  | Prints the resolved gate values; `--install` writes `~/.fleet/check.conf`.                                                                                                                         |
+| `tests/`                              | The suites, plus `tests/testenv.ts` (redirects `Deno.openKv` to `:memory:`).                                                                                                                       |
+| `docs/speed.md`                       | Budgets, mapping table, hermeticity rules, measured timings.                                                                                                                                       |
+| `artifacts/`                          | Gitignored browser-journey output (screenshot, `summary.json`, Chrome profile).                                                                                                                    |
+| `AGENTS.md`                           | This file — the durable rules, not a mirror of the tree.                                                                                                                                           |
 
 ## The gate
 
@@ -49,7 +50,8 @@ moves modules and must update the map rather than silently making this page fals
 | Guards only | `deno task test:guards`                  | —                                                                                    | When you touch the gate, the config or this file.                                                    |
 
 `deno task check:all` (fmt `--check`, lint, `deno check`) is included in both tiers. The tiers run
-80 tests: 17 gate guards, 62 code, 1 real-browser journey across 12 suites plus `tests/testenv.ts`.
+122 tests: 27 gate guards, 94 code, 1 real-browser journey across 14 suite files plus
+`tests/testenv.ts`.
 
 `fleet-check` refuses the full gate from a non-merger lane in its own words ("the FULL gate is the
 merger's job, not a lane's"), because every non-merger full run costs the VM's single heavy slot a
@@ -87,6 +89,7 @@ ua-tracer-qir).
 | `views.ts`                                                                          | `unit_views`, `unit_format`, `http`                                                                         |
 | `backfill.ts`                                                                       | `backfill_test`                                                                                             |
 | `backfill-verified.ts`                                                              | `backfill_verified_test`, `unit_bot_test`                                                                   |
+| `deploy-check.ts`                                                                   | `deploy_check_test` (standalone: nothing imports it, so only its own suite)                                 |
 | `crons.ts`                                                                          | `cron_test`, `http_test`, `gate_mapping_test` (the repair schedule and what `/api/health` reports about it) |
 | `tests/<suite>.ts`                                                                  | that suite (a changed browser suite runs the browser journey)                                               |
 | `deno.json`, `.gitignore`, `LICENSE`, `README.md`, `AGENTS.md`, `docs/*`, `tools/*` | `gate_mapping_test`                                                                                         |

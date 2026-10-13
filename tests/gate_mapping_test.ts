@@ -368,85 +368,175 @@ Deno.test("the docs suite table and the suites on disk are the same set", async 
   }
 });
 
-// docs/speed.md's ## Affected-path mapping table is the third copy of the dispatcher's contract, and
-// the copy a lane reads to decide what its change must run - so a stale row is worse than a missing
-// one: it tells the reader their change is covered while the gate runs something else (the same
-// shape as ua-tracer-h6o, one table over - ua-tracer-1yo). Each row is therefore driven through
-// `--map <path>`, the same subprocess the rest of this file uses, and compared as SETS in both
-// directions, so neither a stale row nor a re-pointed arm passes.
+// The two hand-maintained copies of the dispatcher's contract - docs/speed.md's ## Affected-path
+// mapping and AGENTS.md's "### The map is the contract" - are what a lane reads to decide what its
+// change must run, so a stale row is worse than a missing one: it tells the reader their change is
+// covered while the gate runs something else (the ua-tracer-h6o shape, one table over - ua-tracer-1yo
+// for docs/speed.md, ua-tracer-qir for AGENTS.md, whose table had gone stale the same way).
 //
-// The table has shapes the parser must allow for, each pinned so that a format change fails loudly
-// instead of quietly checking fewer rows:
+// ONE guard covers both, because two guards for one rule is how one of them rots. Each row is driven
+// through `--map <path>` (the same subprocess the rest of this file uses) and compared as SETS in
+// both directions, so neither a stale row nor a re-pointed arm passes. Shapes the parser must allow
+// for, each pinned so a format change fails loudly instead of quietly checking fewer rows:
 //   - a row may name several paths in one cell (`server.ts`, `tests/testenv.ts`), and each of them
 //     must map to that row's suites;
-//   - suite names are shorthand (`unit_keys_test` for `tests/unit_keys_test.ts`);
-//   - two prose rows: the entrypoint row says "every non-browser suite" (the fast tier) and the
+//   - suite names are shorthand in two forms: docs/speed.md writes `unit_keys_test` and AGENTS.md
+//     writes `unit_keys` (and `http` for `http_test`);
+//   - prose rows: the entrypoint row says "every non-browser suite" (the fast tier) and the
 //     self-mapping rows say "that suite".
 // Cells naming a glob (`tools/*`) or a placeholder (`tests/<suite>.ts`) are skipped - the concrete
 // paths in those rows are still checked, and those glob arms are pinned by the tooling test below.
-function suiteFromShorthand(token: string): string {
-  return `tests/${token}${token.endsWith("_test") ? "" : "_test"}.ts`;
+const MAPPING_TABLES = [
+  { file: "docs/speed.md", heading: "## Affected-path mapping", atLeast: 15 },
+  { file: "AGENTS.md", heading: "### The map is the contract", atLeast: 14 },
+];
+
+// A row names suites in shorthand, in either of the two forms above, so a token is resolved by
+// trying the `tests/`-prefixed name with and without `_test` and taking the one that exists on disk.
+// A token that resolves to neither is an error rather than a dropped one: a typo must not quietly
+// shrink the expected set, which would make the comparison below fail for the wrong reason (or, in
+// the other direction, pass).
+async function resolveSuite(token: string): Promise<string | null> {
+  if (!/^[a-z][a-z0-9_]*$/.test(token)) return null;
+  for (const name of [`tests/${token}_test.ts`, `tests/${token}.ts`]) {
+    try {
+      if ((await Deno.stat(`${repoRoot}/${name}`)).isFile) return name;
+    } catch {
+      // Not this form; try the other.
+    }
+  }
+  return null;
 }
 
-Deno.test("the docs affected-path table matches what the dispatcher maps", async () => {
-  const doc = await Deno.readTextFile(new URL("../docs/speed.md", import.meta.url));
-  const from = doc.indexOf("## Affected-path mapping");
-  const to = doc.indexOf("## Hermeticity");
-  if (from < 0 || to < from) {
-    throw new Error("docs/speed.md no longer has an ## Affected-path mapping section");
+// From `heading` to the next heading of the same or higher level, so a section that gains a paragraph
+// or moves does not need this guard edited, and a heading that disappears throws instead of quietly
+// parsing an empty section.
+function sectionOf(text: string, heading: string): string {
+  const lines = text.split("\n");
+  const level = (line: string) => (line.match(/^#+/) ?? [""])[0].length;
+  const at = lines.findIndex((line) => line.trim() === heading);
+  if (at < 0) throw new Error(`${heading} is gone`);
+  for (let i = at + 1; i < lines.length; i++) {
+    if (/^#+ /.test(lines[i]) && level(lines[i]) <= level(lines[at])) {
+      return lines.slice(at, i).join("\n");
+    }
   }
-  const rows = doc.slice(from, to).split("\n")
+  return lines.slice(at).join("\n");
+}
+
+function tableRows(body: string): string[][] {
+  return body.split("\n")
     .map((line) => line.trim())
     .filter((line) => line.startsWith("|"))
     // The header and the `| --- | --- |` separator carry no backticks, so they drop out below.
     .map((line) => line.replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim()))
     .filter((cells) => cells.length >= 2);
+}
 
+const backticked = (cell: string) => [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+const concrete = (cell: string) => backticked(cell).filter((t) => /^[A-Za-z0-9_./-]+$/.test(t));
+
+Deno.test("both affected-path tables match what the dispatcher maps", async () => {
   const fast = (await suites(["--all-suites", "--dry-run"]))
     .filter((suite) => !NON_FAST_SUITES.includes(suite));
   if (fast.length === 0) throw new Error("the fast tier resolved to nothing");
 
-  const backticked = (cell: string) => [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
-  const concrete = (cell: string) => backticked(cell).filter((t) => /^[A-Za-z0-9_./-]+$/.test(t));
-
-  let checked = 0;
-  for (const [pathCell, suiteCell] of rows) {
-    const paths = concrete(pathCell);
-    if (paths.length === 0) continue; // a heading row, or the "anything else" row
-    let expected: string[];
-    if (/every non-browser suite/.test(suiteCell)) {
-      expected = fast;
-    } else if (/that suite/.test(suiteCell)) {
-      // A self-mapping row: `--map <path>` must return exactly this path.
-      expected = paths;
-    } else {
-      expected = backticked(suiteCell).filter((t) => /_test$/.test(t)).map(suiteFromShorthand);
-      if (expected.length === 0) {
-        throw new Error(
-          `docs/speed.md's row for ${paths.join(", ")} names no suite - has the table's format ` +
-            `changed? (${suiteCell})`,
-        );
+  for (const { file, heading, atLeast } of MAPPING_TABLES) {
+    const rows = tableRows(
+      sectionOf(await Deno.readTextFile(new URL(`../${file}`, import.meta.url)), heading),
+    );
+    let checked = 0;
+    for (const [pathCell, suiteCell] of rows) {
+      const paths = concrete(pathCell);
+      if (paths.length === 0) continue; // a heading row, or the "anything else" row
+      let expected: string[];
+      if (/every non-browser suite/.test(suiteCell)) {
+        expected = fast;
+      } else if (/that suite/.test(suiteCell)) {
+        // A self-mapping row: `--map <path>` must return exactly this path.
+        expected = paths;
+      } else {
+        expected = [];
+        for (const token of backticked(suiteCell)) {
+          // A backticked token that is not suite-shaped is prose about the row - `/api/health` in the
+          // crons row - rather than a suite name. A suite-SHAPED token that resolves to nothing is an
+          // error: a typo must not quietly shrink the expected set.
+          if (!/^[a-z][a-z0-9_]*$/.test(token)) continue;
+          const suite = await resolveSuite(token);
+          if (suite === null) {
+            throw new Error(
+              `${file}'s row for ${paths.join(", ")} names '${token}', which is not a suite ` +
+                `on disk - has the table's format changed?`,
+            );
+          }
+          expected.push(suite);
+        }
+        if (expected.length === 0) {
+          throw new Error(
+            `${file}'s row for ${paths.join(", ")} names no suite - has the table's format ` +
+              `changed? (${suiteCell})`,
+          );
+        }
+      }
+      for (const path of paths) {
+        const got = (await suites(["--map", path])).sort();
+        const want = [...expected].sort();
+        if (got.join() !== want.join()) {
+          throw new Error(
+            `${file} says ${path} runs ${want.join(", ") || "(nothing)"}, but ` +
+              `tools/fast-gate.sh maps it to ${got.join(", ") || "(nothing)"}`,
+          );
+        }
+        checked++;
       }
     }
-    for (const path of paths) {
-      const got = (await suites(["--map", path])).sort();
-      const want = [...expected].sort();
-      if (got.join() !== want.join()) {
-        throw new Error(
-          `docs/speed.md says ${path} runs ${want.join(", ") || "(nothing)"}, but ` +
-            `tools/fast-gate.sh maps it to ${got.join(", ") || "(nothing)"}`,
-        );
-      }
-      checked++;
+    // A parser that silently stopped seeing rows (a reflowed table, a renamed column, a heading that
+    // moved out of reach) would make every assertion above vacuous, so the count is asserted against
+    // the table's real shape.
+    if (checked < atLeast) {
+      throw new Error(
+        `only ${checked} concrete paths were checked in ${file}'s ${heading} table, which names ` +
+          `${atLeast}+ - has its format changed?`,
+      );
     }
   }
-  // A parser that silently stopped seeing rows (a reflowed table, a renamed column) would make every
-  // assertion above vacuous, so the count is asserted against the table's real shape.
-  if (checked < 10) {
-    throw new Error(
-      `only ${checked} affected-path rows were checked, but docs/speed.md's table names ~15 paths ` +
-        `- has its format changed?`,
+});
+
+// The other half of a hand-maintained table: a row cannot only be wrong, it can be MISSING, and an
+// omission is invisible to the row-by-row check above - which is exactly how AGENTS.md's Layout table
+// and its affected-path table both lost crons.ts while every row in them was correct (ua-tracer-qir,
+// found on the way to ua-tracer-1yo). Completeness is derivable from the tree, so it is asserted:
+// every tracked top-level `*.ts` module must be named in the first column of each table that
+// describes that tree. `git ls-files '*.ts'` is what AGENTS.md's Layout table says it mirrors, and
+// both affected-path tables must carry a row for every module the dispatcher has an arm for.
+const MODULE_TABLES = [
+  ...MAPPING_TABLES,
+  { file: "AGENTS.md", heading: "## Layout" },
+];
+
+Deno.test("every tracked top-level module is named in the tables that mirror the tree", async () => {
+  const modules = (await gitLines(["ls-files"])).filter((f) => /^[^/]+\.ts$/.test(f));
+  if (modules.length < 5) {
+    throw new Error(`git ls-files listed ${modules.length} top-level .ts modules`);
+  }
+
+  for (const { file, heading } of MODULE_TABLES) {
+    const rows = tableRows(
+      sectionOf(await Deno.readTextFile(new URL(`../${file}`, import.meta.url)), heading),
     );
+    // The path cell of a row, which is where a module is named - `storage.ts` (KV schema) in one file
+    // and `backfill.ts`, `backfill-verified.ts` in another, so the whole cell is read and its
+    // backticked tokens are the names.
+    const named = new Set(rows.flatMap((cells) => concrete(cells[0])));
+    const missing = modules.filter((m) => !named.has(m)).sort();
+    if (missing.length) {
+      throw new Error(
+        `${file}'s ${heading} table does not name ${
+          missing.join(", ")
+        } - every tracked top-level ` +
+          `*.ts module has an arm in tools/fast-gate.sh, so it needs a row here too`,
+      );
+    }
   }
 });
 

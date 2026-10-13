@@ -180,6 +180,24 @@ deno deploy database assign    ua-tracer-kv --org <org> --app ua-tracer
 deno deploy --org <org> --app ua-tracer --prod
 ```
 
+## Verifying a deploy
+
+`/api/health` reports the platform's `DENO_DEPLOY_BUILD_ID` as `build` (ua-tracer-xk5), so a bounded
+sample of it is enough to tell a deploy that rolled from one that did not — no console access, no
+credentials:
+
+```sh
+deno run --allow-net deploy-check.ts                     # 5 samples over ~20s; exit 0 once a build id is present
+deno run --allow-net deploy-check.ts --expect <build-id> # CHANGED (exit 0) vs UNCHANGED / unknown (exit 1)
+```
+
+It prints one line per sample (timestamp, HTTP status, the build value) so the output can be pasted
+into a bead, and it exits non-zero while production is still not rolled. What it can and cannot tell
+you: a present build id proves a revision that emits the field is serving, **not which commit** —
+mapping a build id to a commit happens in the Deno Deploy console. An absent or `null` key on a
+readable response means the revision answering predates the field, which is what a lagging or failed
+deploy looks like from outside.
+
 ## License
 
 MIT © Paul Kinlan

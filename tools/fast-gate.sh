@@ -52,6 +52,7 @@ FAST_SUITES=(
   tests/backfill_verified_test.ts
   tests/cron_test.ts
   tests/http_test.ts
+  tests/deploy_check_test.ts
 )
 
 # Suites that need Chrome and a live localhost server, so they run through their
@@ -131,6 +132,11 @@ map_one() {
     # the bot contract and the backfill contract apply.
     backfill-verified.ts)
       printf '%s\n' tests/backfill_verified_test.ts tests/unit_bot_test.ts
+      ;;
+    # A standalone deploy check (ua-tracer-ajc): nothing imports it, so only its own
+    # suite is affected. Its fetch is injected, so the suite stays hermetic.
+    deploy-check.ts)
+      printf '%s\n' tests/deploy_check_test.ts
       ;;
     # A changed test runs itself (the browser suite included: a change to it is
     # exactly when the browser run is worth paying for).

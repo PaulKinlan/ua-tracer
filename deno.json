@@ -5,8 +5,8 @@
     "backfill": "deno run --allow-all --unstable-kv backfill.ts",
     "backfill-verify": "deno run --allow-all --unstable-kv backfill-verified.ts",
 
-    "fmt:check": "deno fmt --check",
-    "lint:check": "deno lint",
+    "fmt:check": "deno fmt --check --ignore=artifacts --ignore=.beads --ignore=.dolt --ignore=.beads-credential-key",
+    "lint:check": "deno lint --ignore=artifacts --ignore=.beads --ignore=.dolt --ignore=.beads-credential-key",
     "typecheck": "deno check --unstable-kv *.ts tests/*.ts",
     "check:all": "deno task fmt:check && deno task lint:check && deno task typecheck",
 

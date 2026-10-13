@@ -447,8 +447,21 @@ ${body}
 </html>`;
 }
 
-// Short labels for the per-trace "Fetched" sub-resource badges.
-const SHORT_KIND: Partial<Record<AssetKind, string>> = {
+// Kinds that are recorded but are NOT "Fetched" sub-resource badges. They are rendered as their own
+// markers elsewhere (the request rows, and the EXECUTED JS / ES module / posted timing pills), so
+// they do not belong in the badge list. Naming them explicitly is the point (ua-tracer-wot): a kind
+// outside this list must have a badge label below or the build fails, and a kind inside it is a
+// deliberate decision written down rather than a silent drop.
+const NON_BADGE_KINDS = ["homepage", "timing", "js-ran", "module-ran"] as const;
+// Exported so the guard in tests/unit_views_test.ts can take its expectations from the code rather
+// than repeating a fourth list of kinds.
+export { NON_BADGE_KINDS };
+type BadgeKind = Exclude<AssetKind, typeof NON_BADGE_KINDS[number]>;
+
+// Short labels for the per-trace "Fetched" sub-resource badges. Record<BadgeKind, string> is
+// exhaustive on purpose: a kind added to AssetKind and not listed here - and not named in
+// NON_BADGE_KINDS - fails typecheck instead of quietly disappearing from the UI.
+const SHORT_KIND: Record<BadgeKind, string> = {
   css: "CSS",
   js: "JS",
   module: "module",
@@ -470,28 +483,10 @@ const SHORT_KIND: Partial<Record<AssetKind, string>> = {
   "csp-report": "CSP report",
   report: "report-api",
 };
-const KIND_ORDER: AssetKind[] = [
-  "css",
-  "js",
-  "module",
-  "img",
-  "font",
-  "css-bg",
-  "css-font",
-  "favicon",
-  "apple-icon",
-  "manifest",
-  "manifest-icon",
-  "preload",
-  "prefetch",
-  "og-image",
-  "twitter-image",
-  "iframe",
-  "iframe-img",
-  "css-import",
-  "csp-report",
-  "report",
-];
+
+// The badge render order IS the label map's declaration order, derived rather than repeated. The two
+// lists this replaces had to be kept in step by hand, which is how one of them could be missed.
+export const KIND_ORDER: readonly BadgeKind[] = Object.keys(SHORT_KIND) as BadgeKind[];
 function kindBadges(kinds: AssetKind[]): string {
   const present = KIND_ORDER.filter((k) => kinds.includes(k));
   if (!present.length) return '<span class="muted">—</span>';

@@ -9,7 +9,8 @@
 // Permissions: this suite is run by its own deno task
 // (`deno task test:guards`) with --allow-env --allow-read --allow-write=.
 // --allow-run=git,bash,deno, because it shells out to git, to the gate script,
-// and (from ua-tracer-ha5) to `deno fmt --check` itself. The other suites stay
+// and (from ua-tracer-ha5) to the fmt check itself - as `deno task fmt:check`, from
+// ua-tracer-hae, so it measures the command the gate runs. The other suites stay
 // permission-tight.
 
 const repoRoot = Deno.realPathSync(new URL("..", import.meta.url));
@@ -543,8 +544,10 @@ Deno.test("every tracked top-level module is named in the tables that mirror the
 // ua-tracer-ha5: the fmt:check, lint:check and typecheck tasks derive their path sets from the tree
 // instead of enumerating them, because an enumerated list is the thing that drifts - lint:check
 // listed eight paths and omitted crons.ts, so the gate's lint step stayed green while that file
-// carried a violation. That derivation rests on .gitignore: deno walks everything git does not
-// ignore. The assertions below turn that structural argument into a checked one, in the same spirit
+// carried a violation. That derivation rests on what deno is told to ignore: the .gitignore files
+// it reads itself, plus the task's explicit --ignore set (ua-tracer-hae; .git/info/exclude is NOT
+// part of that - deno does not read it, which is why bd's .beads/ needed an explicit --ignore).
+// The assertions below turn that structural argument into a checked one, in the same spirit
 // as the table-vs-directory parity above.
 
 // The extensions `deno fmt` handles. Kept here rather than in deno.json because it describes what
@@ -579,9 +582,18 @@ async function gitLines(args: string[]): Promise<string[]> {
   return new TextDecoder().decode(out.stdout).split("\n").filter((l) => l.length > 0);
 }
 
-Deno.test("the files deno fmt would check cover every tracked file of the kinds it formats", async () => {
+Deno.test("the files the fmt:check task checks cover every tracked file of the kinds it formats", async () => {
+  // ua-tracer-hae: the count is taken from the TASK, never from a bare `deno fmt --check`, because
+  // the two disagree wherever a path is hidden by .git/info/exclude rather than .gitignore (bd's
+  // .beads/, .dolt/): git's --exclude-standard view of "untracked" below hides such paths, while
+  // bare deno fmt - which reads only .gitignore - checks them. That made the bare-count version of
+  // this guard red on machine state in any tree with a populated .beads/ (29 vs 26: deno checking
+  // three files git refused to list), the very state the task's --ignore set exists to walk past.
+  // Measuring the command the gate actually runs is correct in both directions: an info/exclude
+  // path the task forgets to ignore shows up as files "git neither tracks nor lists", and a
+  // --ignore that masks a tracked file shows up as a skip.
   const out = await new Deno.Command("deno", {
-    args: ["fmt", "--check"],
+    args: ["task", "fmt:check"],
     cwd: repoRoot,
     stdout: "piped",
     stderr: "piped",
@@ -591,7 +603,7 @@ Deno.test("the files deno fmt would check cover every tracked file of the kinds 
     text.match(/not formatted files? in (\d+) files?/);
   if (!m) {
     throw new Error(
-      "could not read a file count out of `deno fmt --check` - has its output format changed? tail: " +
+      "could not read a file count out of `deno task fmt:check` - has its output format changed? tail: " +
         text.trim().slice(-200),
     );
   }
@@ -614,16 +626,20 @@ Deno.test("the files deno fmt would check cover every tracked file of the kinds 
   const coveringTracked = denoCount - untracked.length;
   if (coveringTracked !== trackedHere.length) {
     const drift = coveringTracked < trackedHere.length
-      ? `deno is SKIPPING ${trackedHere.length - coveringTracked} file(s) that git tracks ` +
-        "and the worktree still has (one of them matched an ignore rule - the assertion below " +
-        "names which)"
-      : `deno is CHECKING ${
+      ? `the fmt task is SKIPPING ${
+        trackedHere.length - coveringTracked
+      } file(s) that git tracks ` +
+        "and the worktree still has (an ignore rule or the task's --ignore set masks them; " +
+        ".gitignore rules are named by the assertion below)"
+      : `the fmt task is CHECKING ${
         coveringTracked - trackedHere.length
-      } file(s) that git neither tracks nor ` +
-        "lists as untracked";
+      } file(s) that git neither tracks ` +
+        "nor lists as untracked - typically a .git/info/exclude path its --ignore set does not " +
+        "cover: the verdict then depends on files the repository cannot see. Add the path to the " +
+        "task's --ignore set, or stop hiding it";
     throw new Error(
-      `deno fmt --check would check ${denoCount} files, ${untracked.length} of them untracked; that ` +
-        `leaves ${coveringTracked} covering the ${trackedHere.length} fmt-able files git tracks ` +
+      `deno task fmt:check would check ${denoCount} files, ${untracked.length} of them untracked; ` +
+        `that leaves ${coveringTracked} covering the ${trackedHere.length} fmt-able files git tracks ` +
         `and the worktree still has - ${drift}`,
     );
   }

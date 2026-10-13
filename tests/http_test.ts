@@ -6,8 +6,10 @@
 
 import {
   clearKv,
+  connInfo,
   countPrefix,
   req,
+  seedBotRanges,
   testKv,
   traceBaseFromHtml,
   traceIdFromSetCookie,
@@ -26,11 +28,24 @@ import {
 
 const UA = "TestAgent/1.0";
 const IP = "203.0.113.7";
+// A Googlebot address inside the published range fixture, and the client's own
+// claim about itself. Tests hand the peer to the handler and the claim to the
+// request, so a verdict taken from the wrong one shows up as a wrong badge.
+const GOOGLE_IP = "66.249.66.1";
+const SPOOFED_IP = "198.51.100.99";
+const GOOGLEBOT_UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+const GOOGLE_RANGES = { Googlebot: ["66.249.64.0/19"] };
 
-/** Mint a trace through the real homepage and dig the probe base out of it. */
+/**
+ * Mint a trace through the real homepage and dig the probe base out of it. The IP
+ * is the connection peer (as `Deno.serve` reports it) and the request also claims
+ * a different address, so anything downstream that reads a header instead of the
+ * peer is visible as a wrong recorded IP or verdict.
+ */
 async function mint(ua = UA, ip = IP) {
   const res = await handler(
-    req("/", { headers: { "user-agent": ua, "x-forwarded-for": ip } }),
+    req("/", { headers: { "user-agent": ua, "x-forwarded-for": SPOOFED_IP } }),
+    connInfo(ip),
   );
   const html = await res.text();
   return { res, html, ...traceBaseFromHtml(html) };
@@ -75,6 +90,54 @@ Deno.test("GET / mints a trace, gates the probe base with a secret, sets the coo
   if (root.length !== 1 || root[0].kind !== "homepage") {
     throw new Error(`expected one homepage hit, got ${JSON.stringify(root.map((h) => h.kind))}`);
   }
+});
+
+Deno.test("a spoofed x-forwarded-for cannot turn a claimed bot into a verified one", async () => {
+  await clearKv();
+  await seedBotRanges(GOOGLE_RANGES);
+  // The request claims a Google address in the header; the connection came from
+  // the test peer, which is not in any published range.
+  const { html, id } = await mint(GOOGLEBOT_UA, IP);
+  const kv = await testKv();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+  if (trace.ip !== IP) throw new Error(`recorded the claimed address: ${trace.ip}`);
+  if (trace.verified?.status !== "unverified") {
+    throw new Error(`spoofed header decided the verdict: ${JSON.stringify(trace.verified)}`);
+  }
+  // The badge is what the bug forged, so assert on the rendered page.
+  if (html.includes("✓ Googlebot")) throw new Error("the homepage still shows a verified badge");
+  if (!html.includes("fake Googlebot")) throw new Error("no spoof warning on the homepage");
+  const detail = await (
+    await handler(req(`/trace/${id}`), connInfo(IP))
+  ).text();
+  if (detail.includes("✓ verified")) throw new Error("the trace page still shows a verified badge");
+});
+
+Deno.test("with no connection metadata a claimed bot cannot be verified from a header", async () => {
+  await clearKv();
+  await seedBotRanges(GOOGLE_RANGES);
+  // No `info` at all: the request's own Google claim is the only address there
+  // is. It must still not be enough to mint a verified badge.
+  const res = await handler(
+    req("/", { headers: { "user-agent": GOOGLEBOT_UA, "x-forwarded-for": GOOGLE_IP } }),
+  );
+  const html = await res.text();
+  if (html.includes("✓ Googlebot")) {
+    throw new Error("a header decided the verdict when no peer was available");
+  }
+});
+
+Deno.test("a peer inside the published range still verifies", async () => {
+  await clearKv();
+  await seedBotRanges(GOOGLE_RANGES);
+  const { html, id } = await mint(GOOGLEBOT_UA, GOOGLE_IP);
+  const kv = await testKv();
+  const trace = (await kv.get<TraceRecord>(["trace", id])).value!;
+  if (trace.ip !== GOOGLE_IP) throw new Error(`recorded ip ${trace.ip}`);
+  if (trace.verified?.bot !== "Googlebot" || trace.verified.status !== "verified") {
+    throw new Error(`a real bot lost its verdict: ${JSON.stringify(trace.verified)}`);
+  }
+  if (!html.includes("✓ Googlebot")) throw new Error("the verified badge is missing");
 });
 
 Deno.test("the homepage links direct assets and no CSS/JS-only probe", async () => {

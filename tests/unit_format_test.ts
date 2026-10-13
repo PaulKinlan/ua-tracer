@@ -10,6 +10,7 @@ import {
   fmtTs,
   ipv4ToInt,
   uaHeadline,
+  verificationIp,
 } from "../server.ts";
 
 Deno.test("escapeHtml neutralises the five HTML-significant characters", () => {
@@ -67,28 +68,55 @@ Deno.test("uaHeadline labels a missing user-agent explicitly", () => {
   if (uaHeadline("") !== "(no user-agent)") throw new Error(uaHeadline(""));
 });
 
-Deno.test("clientIp honours x-forwarded-for, then x-real-ip, then remoteAddr", () => {
-  const xff = clientIp(
+/** Connection metadata as `Deno.serve` supplies it: the peer address. */
+function peer(hostname: string): Deno.ServeHandlerInfo {
+  return {
+    remoteAddr: { transport: "tcp", hostname, port: 443 },
+    completed: Promise.resolve(),
+  } as unknown as Deno.ServeHandlerInfo;
+}
+
+Deno.test("clientIp is the connection peer, not a claim the request makes about itself", () => {
+  // A client-supplied x-forwarded-for must not override the real peer.
+  const spoofed = clientIp(
+    new Request("https://uatracer.com/", {
+      headers: { "x-forwarded-for": "1.2.3.4, 5.6.7.8", "x-real-ip": "9.9.9.9" },
+    }),
+    peer("203.0.113.7"),
+  );
+  if (spoofed !== "203.0.113.7") throw new Error(`peer lost to a header -> ${spoofed}`);
+
+  // IPv4-mapped peers are normalised so cidrContains4 can match them.
+  const mapped = clientIp(new Request("https://uatracer.com/"), peer("::ffff:203.0.113.7"));
+  if (mapped !== "203.0.113.7") throw new Error(`IPv4-mapped peer -> ${mapped}`);
+
+  // Without connection metadata the claimed address is still recorded, in the
+  // documented order, so a handler called without `info` logs something useful.
+  const claimed = clientIp(
     new Request("https://uatracer.com/", {
       headers: { "x-forwarded-for": "1.2.3.4, 5.6.7.8" },
     }),
   );
-  if (xff !== "1.2.3.4") throw new Error(`x-forwarded-for -> ${xff}`);
+  if (claimed !== "1.2.3.4") throw new Error(`claimed x-forwarded-for -> ${claimed}`);
 
   const real = clientIp(
-    new Request("https://uatracer.com/", {
-      headers: { "x-real-ip": "9.9.9.9" },
-    }),
+    new Request("https://uatracer.com/", { headers: { "x-real-ip": "9.9.9.9" } }),
   );
-  if (real !== "9.9.9.9") throw new Error(`x-real-ip -> ${real}`);
-
-  const addr = clientIp(new Request("https://uatracer.com/"), {
-    remoteAddr: { transport: "tcp", hostname: "10.0.0.7", port: 1234 },
-  } as unknown as Deno.ServeHandlerInfo);
-  if (addr !== "10.0.0.7") throw new Error(`remoteAddr -> ${addr}`);
+  if (real !== "9.9.9.9") throw new Error(`claimed x-real-ip -> ${real}`);
 
   const none = clientIp(new Request("https://uatracer.com/"));
   if (none !== "unknown") throw new Error(`no address -> ${none}`);
+});
+
+Deno.test("verificationIp only ever returns the peer, so a header cannot decide a verdict", () => {
+  if (verificationIp(peer("66.249.66.1")) !== "66.249.66.1") {
+    throw new Error("peer not used for verification");
+  }
+  // No connection metadata, however loud the request is about its own address.
+  const noPeer = verificationIp();
+  if (noPeer !== "unknown") throw new Error(`headers influenced the verdict IP -> ${noPeer}`);
+  // "unknown" is not a dotted quad, so it can never match a published range.
+  if (ipv4ToInt(noPeer) !== null) throw new Error("the no-peer verdict IP is matchable");
 });
 
 Deno.test("ipv4ToInt rejects anything that is not a dotted quad", () => {

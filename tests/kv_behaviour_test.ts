@@ -4,7 +4,7 @@
 // loop losing an update (the bug the CAS exists to prevent: a clobbered jsRan
 // flag or a short assetCount).
 
-import { clearKv, countPrefix, req, testKv, traceBaseFromHtml } from "./testenv.ts";
+import { clearKv, connInfo, countPrefix, req, testKv, traceBaseFromHtml } from "./testenv.ts";
 import {
   handler,
   type HitRecord,
@@ -29,7 +29,11 @@ const UA = "ConcurrentBot/9.9";
 const IP = "198.51.100.4";
 
 async function mintOnce(ua = UA) {
-  const res = await handler(req("/", { headers: { "user-agent": ua, "x-forwarded-for": IP } }));
+  // The peer is the IP the app records; the header is a claim it must ignore.
+  const res = await handler(
+    req("/", { headers: { "user-agent": ua, "x-forwarded-for": "198.51.100.200" } }),
+    connInfo(IP),
+  );
   const html = await res.text();
   return traceBaseFromHtml(html);
 }

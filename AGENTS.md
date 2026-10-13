@@ -150,6 +150,12 @@ Two things a lane must not break:
   cannot be resolved must classify as _unverified/unverifiable_, never _verified_.
 - `*.deno.net` / `*.deno.dev` → `301` to the canonical origin; `/api/health` is exempt so uptime
   monitors are not redirected.
+- A **stored** verdict is only as good as the address it was minted from.
+  `deno task backfill-verify` refuses to publish `verified` for a trace whose stored IP came from a
+  forwarding header (read back out of the recorded headers, `storedIpSource` in
+  `backfill-verified.ts`) or whose provenance cannot be established at all, and re-tags it
+  `unverifiable` instead — a forged address already in KV must not be republished, and the run
+  reports how many verdicts it withheld (ua-tracer-4c9).
 - `HEAD` must return the same headers as `GET` with an empty body.
 
 ## Working on this repo (fleet lanes)

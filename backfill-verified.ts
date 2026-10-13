@@ -1,7 +1,12 @@
-// One-off backfill: compute the IP-range `verified` classification for every
+// One-off backfill: recompute the IP-range `verified` classification for every
 // existing trace and write it back onto the trace record and its recent/UA
-// index snapshots. Idempotent — safe to re-run; it overwrites `verified` on
-// every trace from the authoritative source IP + UA.
+// index snapshots. Idempotent — safe to re-run.
+//
+// The stored `ip` may only decide a verdict when the client could not have written
+// it (see `storedIpSource`): a trace whose address was read out of a forwarding
+// header — every trace written before the peer-based request path landed — is
+// re-tagged `unverifiable` instead, so an address a client forged can never be
+// republished as `verified` (ua-tracer-4c9).
 //
 // Run against production KV:
 //   DENO_KV_ACCESS_TOKEN=<org token> \
@@ -31,8 +36,66 @@ export interface BackfillVerifiedResult {
    * them in; the CLI exits non-zero while this is not zero (ua-tracer-5ub).
    */
   unsettled: number;
+  /**
+   * Claimed-bot traces whose stored address could not support a verdict (it came from a
+   * forwarding header, or no address evidence was stored at all), so none was minted from
+   * it. They are re-tagged `unverifiable` instead (ua-tracer-4c9).
+   */
+  unprovenanced: number;
+  /**
+   * Of `unprovenanced`, how many the stored address alone would have classified as
+   * `verified`. This is the size of the forged-badge population the run refuses to
+   * republish, and the number to quote when measuring the run's effect on live data.
+   */
+  withheldVerified: number;
   /** "status bot" -> number of traces, for the console breakdown. */
   tally: Record<string, number>;
+}
+
+/**
+ * Where a stored trace's `ip` came from.
+ *
+ * `"peer"` — the connection address the runtime accepted (Deno's `remoteAddr`). The client
+ * cannot choose it, so it may decide a verdict.
+ * `"claimed"` — the value of a forwarding header (`x-forwarded-for` / `x-real-ip`). The
+ * client writes those, so such an address may be recorded but never decides a verdict.
+ * `"unknown"` — no address, or no header evidence to reason from.
+ */
+export type IpSource = "peer" | "claimed" | "unknown";
+
+/** Same address, however the runtime spelled it (`::ffff:1.2.3.4` is `1.2.3.4`). */
+function sameAddress(a: string, b: string): boolean {
+  const norm = (v: string) => v.trim().replace(/^::ffff:/, "");
+  return norm(a) === norm(b);
+}
+
+/**
+ * The provenance of a STORED address. Records carry the address, the request headers and the
+ * UA but no provenance marker of their own, so it is read back from those using the one
+ * property every version of `clientIp()` has had: **a forwarding header wins over the
+ * connection peer**. An address equal to a recorded forwarding-header value was produced by
+ * that header (`"claimed"`); an address equal to none of them cannot have come from one
+ * (`"peer"`). That reading is correct both for records written before the peer-based request
+ * path (address = the header the client sent) and after it (address = the peer, while any
+ * header is only a claim to compare against).
+ *
+ * A record with no recorded headers is not evidence of anything — every HTTP request has
+ * headers, so an empty map means the record predates the header capture — and reads as
+ * `"unknown"`, which is not a verdict basis either. Header names are compared lowercased
+ * because `headersToObject` stores them as the `Headers` API reports them.
+ */
+export function storedIpSource(
+  t: Pick<TraceRecord, "ip"> & { headers?: Record<string, string> },
+): IpSource {
+  const ip = (t.ip ?? "").trim();
+  if (!ip || ip === "unknown") return "unknown";
+  const headers = t.headers ?? {};
+  if (Object.keys(headers).length === 0) return "unknown";
+  const claims = [
+    (headers["x-forwarded-for"] ?? "").split(",")[0],
+    headers["x-real-ip"] ?? "",
+  ].map((v) => v.trim()).filter((v) => v.length > 0);
+  return claims.some((claim) => sameAddress(claim, ip)) ? "claimed" : "peer";
 }
 
 export interface BackfillVerifiedOptions {
@@ -108,6 +171,8 @@ export async function runBackfillVerified(
   let scanned = 0;
   let updated = 0;
   let unsettled = 0;
+  let unprovenanced = 0;
+  let withheldVerified = 0;
   const tally = new Map<string, number>();
 
   console.log('backfill-verified: streaming ["trace"] records…');
@@ -116,7 +181,27 @@ export async function runBackfillVerified(
     const t = entry.value;
     if (!t || !t.id || typeof t.ts !== "number") continue;
 
-    const result: BotVerification | null = await classifyBot(t.ip ?? "", t.ua ?? "");
+    // The verdict may only be minted from an address the client could not write. The
+    // claimed bot family is worth naming either way, so the classification is still made —
+    // it is its `verified` state that is not ours to publish for an unprovenanced address.
+    const source = storedIpSource(t);
+    const classified: BotVerification | null = await classifyBot(t.ip ?? "", t.ua ?? "");
+    let result = classified;
+    if (classified && source !== "peer") {
+      unprovenanced++;
+      if (classified.status === "verified") withheldVerified++;
+      if (classified.status !== "unverifiable") {
+        // "unverifiable", deliberately not "unverified": the address was not checked, and
+        // saying "unverified" would accuse the UA of spoofing an address we never trusted.
+        result = {
+          bot: classified.bot,
+          status: "unverifiable",
+          note: source === "unknown"
+            ? `no client address was recorded for this trace, so ${classified.bot} ranges could not be checked`
+            : `the recorded client address came from a forwarding header, which the client writes, so ${classified.bot} ranges were not checked against it`,
+        };
+      }
+    }
     const label = result ? `${result.status} ${result.bot}` : "(not a bot)";
     tally.set(label, (tally.get(label) ?? 0) + 1);
 
@@ -153,8 +238,22 @@ export async function runBackfillVerified(
   [...tally.entries()].sort((a, b) => b[1] - a[1]).forEach(([k, n]) =>
     console.log(`  ${n.toString().padStart(5)}  ${k}`)
   );
+  if (unprovenanced > 0) {
+    console.log(
+      `backfill-verified: ${unprovenanced} claimed-bot trace(s) had no address the client could not ` +
+        `have written, so no verdict was minted from it - ${withheldVerified} of them would have ` +
+        `been classified "verified" from the stored address and were withheld instead.`,
+    );
+  }
 
-  return { scanned, updated, unsettled, tally: Object.fromEntries(tally) };
+  return {
+    scanned,
+    updated,
+    unsettled,
+    unprovenanced,
+    withheldVerified,
+    tally: Object.fromEntries(tally),
+  };
 }
 
 if (import.meta.main) {

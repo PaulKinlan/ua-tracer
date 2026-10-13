@@ -147,7 +147,7 @@ map_one() {
     # this gate: the mapping guard is the bounded subset that proves the dispatcher
     # still maps and still fails closed (and the config guard runs on every
     # invocation regardless).
-    deno.json | .gitignore | LICENSE | README.md | AGENTS.md | docs/* | tools/*)
+    deno.json | .gitignore | LICENSE | README.md | AGENTS.md | docs/* | tools/* | .github/*)
       printf '%s\n' tests/gate_mapping_test.ts
       ;;
     *)

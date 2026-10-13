@@ -615,7 +615,9 @@ Deno.test("every tracked top-level module is named in the tables that mirror the
 // as the table-vs-directory parity above.
 
 // The extensions `deno fmt` handles. Kept here rather than in deno.json because it describes what
-// deno does, not what this repository asks of it.
+// deno does, not what this repository asks of it. `.yml`/`.yaml` are in the list because deno
+// formats them (checked against the deno in use, 2.9.x): leaving them out made this guard disagree
+// with the task the moment the repository gained a workflow file (ua-tracer-77d).
 const DENO_FMT_EXTENSIONS = [
   ".ts",
   ".tsx",
@@ -628,6 +630,8 @@ const DENO_FMT_EXTENSIONS = [
   ".md",
   ".json",
   ".jsonc",
+  ".yml",
+  ".yaml",
 ];
 
 const isFmtable = (f: string) => DENO_FMT_EXTENSIONS.some((e) => f.endsWith(e));

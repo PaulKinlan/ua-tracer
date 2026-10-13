@@ -80,20 +80,20 @@ asserted rather than asked for: `tests/gate_mapping_test.ts` drives both tables 
 requires every tracked top-level module to have a row in each of them (ua-tracer-1yo,
 ua-tracer-qir).
 
-| Changed path                                                                        | Suites                                                                                                      |
-| ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `server.ts`, `tests/testenv.ts`                                                     | every non-browser suite                                                                                     |
-| `storage.ts` (KV schema)                                                            | `unit_keys`, `kv_behaviour`, `backfill`, `backfill_verified`, `http`                                        |
-| `bot-verification.ts`                                                               | `unit_bot`, `unit_format`, `backfill_verified`, `http`                                                      |
-| `probes.ts`                                                                         | `unit_probes`, `http`, `kv_behaviour`                                                                       |
-| `views.ts`                                                                          | `unit_views`, `unit_format`, `http`                                                                         |
-| `backfill.ts`                                                                       | `backfill_test`                                                                                             |
-| `backfill-verified.ts`                                                              | `backfill_verified_test`, `unit_bot_test`                                                                   |
-| `deploy-check.ts`                                                                   | `deploy_check_test` (standalone: nothing imports it, so only its own suite)                                 |
-| `crons.ts`                                                                          | `cron_test`, `http_test`, `gate_mapping_test` (the repair schedule and what `/api/health` reports about it) |
-| `tests/<suite>.ts`                                                                  | that suite (a changed browser suite runs the browser journey)                                               |
-| `deno.json`, `.gitignore`, `LICENSE`, `README.md`, `AGENTS.md`, `docs/*`, `tools/*` | `gate_mapping_test`                                                                                         |
-| anything else                                                                       | **exit 2, fail closed**                                                                                     |
+| Changed path                                                                                               | Suites                                                                                                      |
+| ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `server.ts`, `tests/testenv.ts`                                                                            | every non-browser suite                                                                                     |
+| `storage.ts` (KV schema)                                                                                   | `unit_keys`, `kv_behaviour`, `backfill`, `backfill_verified`, `http`                                        |
+| `bot-verification.ts`                                                                                      | `unit_bot`, `unit_format`, `backfill_verified`, `http`                                                      |
+| `probes.ts`                                                                                                | `unit_probes`, `http`, `kv_behaviour`                                                                       |
+| `views.ts`                                                                                                 | `unit_views`, `unit_format`, `http`                                                                         |
+| `backfill.ts`                                                                                              | `backfill_test`                                                                                             |
+| `backfill-verified.ts`                                                                                     | `backfill_verified_test`, `unit_bot_test`                                                                   |
+| `deploy-check.ts`                                                                                          | `deploy_check_test` (standalone: nothing imports it, so only its own suite)                                 |
+| `crons.ts`                                                                                                 | `cron_test`, `http_test`, `gate_mapping_test` (the repair schedule and what `/api/health` reports about it) |
+| `tests/<suite>.ts`                                                                                         | that suite (a changed browser suite runs the browser journey)                                               |
+| `deno.json`, `.gitignore`, `LICENSE`, `README.md`, `AGENTS.md`, `docs/*`, `tools/*`, `.github/workflows/*` | `gate_mapping_test`                                                                                         |
+| anything else                                                                                              | **exit 2, fail closed**                                                                                     |
 
 Both guard suites (`gate_mapping_test`, `gate_config_test`) run on every invocation. An empty delta
 runs everything: "nothing changed" must never mean "nothing verified".
@@ -193,7 +193,14 @@ deno task backfill         # one-off maintenance
 deno task backfill-verify  # re-tag traces with the IP-range verdict
 ```
 
-Requires Deno with `--unstable-kv` (the tasks pass it). Deploy: the KV database must be provisioned
-and assigned to the app first (`Deno.openKv()` is not auto-available, and the build fails at warmup
-without it), then `deno deploy --org paulkinlan-ea --app ua-tracer --prod` (see `deno.json`
-`"deploy"`).
+Requires Deno with `--unstable-kv` (the tasks pass it). Deploy: the app is linked to this GitHub
+repository, so a push to `main` is what deploys (ua-tracer-77d); the KV database must have been
+provisioned and assigned to the app once (`Deno.openKv()` is not auto-available, and the build fails
+at warmup without it), and `UA_TRACER_CRON=1` must be set in the app's **Production** context or
+ua-tracer-2t9's hourly repair never registers — `/api/health`'s `repair.expected` is the only
+signal, and `.github/workflows/production-health.yml` warns (temporarily, naming the owner) while it
+is false: the build check in that workflow is the hard one, ua-tracer-ruz owns the variable, and
+ua-tracer-a7x flips the cron half to a hard failure. The manual CLI path
+(`deno deploy --org paulkinlan-ea --app ua-tracer --prod`, see `deno.json` `"deploy"`) is documented
+in README as the fallback for a fresh app or a lost link; the `deno deploy` CLI cannot link an
+existing app to a repository (it only takes `--owner`/`--repo` when _creating_ one).

@@ -90,6 +90,62 @@ Deno.test("the tasks the config names exist and wrap the two gate scripts", asyn
   if (dj.tasks["test:full"] !== full) throw new Error(`test:full is ${dj.tasks["test:full"]}`);
 });
 
+// ua-tracer-4sf: the same drift, one level out. The tasks above must exist because the gate runs
+// them; a doc that tells a reader - very often a lane, mid-hand-off - to run `deno task <name>` that
+// deno.json no longer declares is a stale instruction that fails in the reader's hands. Nothing
+// compared the two, and the docs name far more of the tasks than the config does.
+//
+// The detector is deliberately narrow about what counts as an instruction: a mention with no
+// readable task name (`deno task` quoted as a phrase, or a `deno task <name>` placeholder) names no
+// task and so cannot be stale, and is skipped. That is a narrower DETECTOR, not a looser comparison -
+// every name the scan does read must be a deno.json key, exactly. The narrowing is measured rather
+// than convenient: the first version failed this suite on docs/speed.md's own sentence about the
+// guard, and a docs/*.md change runs this suite for every lane (the table's config arm). What stops
+// the tolerance becoming blindness is the floor below - a scan that reads fewer than five names
+// throws instead of passing.
+const DENO_TASK_NAME = /^[a-z][a-z0-9:_-]*$/;
+
+Deno.test("every deno task a doc tells you to run exists in deno.json", async () => {
+  const tasks = (JSON.parse(await Deno.readTextFile(`${repoRoot}/deno.json`)) as {
+    tasks: Record<string, string>;
+  }).tasks;
+  const docFiles = ["README.md", "AGENTS.md"];
+  for await (const entry of Deno.readDir(`${repoRoot}/docs`)) {
+    if (entry.isFile && entry.name.endsWith(".md")) docFiles.push(`docs/${entry.name}`);
+  }
+  if (docFiles.length < 3) {
+    throw new Error(`expected README.md, AGENTS.md and docs/*.md, found: ${docFiles.join(", ")}`);
+  }
+
+  const bad: string[] = [];
+  let mentions = 0;
+  for (const file of docFiles) {
+    const text = await Deno.readTextFile(`${repoRoot}/${file}`);
+    text.split("\n").forEach((line, index) => {
+      // The name ends at whitespace, a backtick or a quote; a full stop after it belongs to the
+      // sentence, not to the task name.
+      for (const m of line.matchAll(/deno[ \t]+task(?:[ \t]+([^\s`'"]+))?/g)) {
+        const name = (m[1] ?? "").replace(/[.,;:)\]]+$/, "");
+        if (!DENO_TASK_NAME.test(name)) continue; // named no task, so nothing to go stale
+        mentions++;
+        if (!(name in tasks)) {
+          bad.push(
+            `${file}:${index + 1} tells the reader to run 'deno task ${name}', which deno.json ` +
+              `does not declare`,
+          );
+        }
+      }
+    });
+  }
+  if (mentions < 5) {
+    throw new Error(
+      `only ${mentions} readable 'deno task <name>' mentions found - has the scan gone blind ` +
+        `(a reflowed doc, a renamed directory, a broken pattern)?`,
+    );
+  }
+  if (bad.length) throw new Error(bad.join("; "));
+});
+
 Deno.test("--install writes exactly the tracked values", async () => {
   const dir = `${repoRoot}/artifacts/gate-config-test`;
   await Deno.mkdir(dir, { recursive: true });

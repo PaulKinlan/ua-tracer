@@ -14,6 +14,14 @@
 
 const repoRoot = Deno.realPathSync(new URL("..", import.meta.url));
 
+// The three suites that are not part of the affected (fast) tier: the gate guards run on every
+// invocation whatever the delta, and the browser journey is full-only.
+const NON_FAST_SUITES = [
+  "tests/gate_mapping_test.ts",
+  "tests/gate_config_test.ts",
+  "tests/browser_journey_test.ts",
+];
+
 async function run(
   args: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -173,13 +181,7 @@ Deno.test("a real delta resolves through git diff, not just --map", async () => 
     // its own name (server.ts -> the whole fast set).
     const serverMap = await suites(["--map", "server.ts"]);
     const fast = (await suites(["--all-suites", "--dry-run"]))
-      .filter((suite) =>
-        ![
-          "tests/browser_journey_test.ts",
-          "tests/gate_config_test.ts",
-          "tests/gate_mapping_test.ts",
-        ].includes(suite)
-      );
+      .filter((suite) => !NON_FAST_SUITES.includes(suite));
     if ([...serverMap].sort().join() !== [...fast].sort().join()) {
       throw new Error(`server.ts maps to ${serverMap.join()}, expected ${fast.join()}`);
     }
@@ -362,6 +364,88 @@ Deno.test("the docs suite table and the suites on disk are the same set", async 
       "docs/speed.md's suite table and tests/ disagree" +
         ` - tiered but not tabled: ${missing.join(", ") || "(none)"}` +
         `; tabled but not on disk: ${extra.join(", ") || "(none)"}`,
+    );
+  }
+});
+
+// docs/speed.md's ## Affected-path mapping table is the third copy of the dispatcher's contract, and
+// the copy a lane reads to decide what its change must run - so a stale row is worse than a missing
+// one: it tells the reader their change is covered while the gate runs something else (the same
+// shape as ua-tracer-h6o, one table over - ua-tracer-1yo). Each row is therefore driven through
+// `--map <path>`, the same subprocess the rest of this file uses, and compared as SETS in both
+// directions, so neither a stale row nor a re-pointed arm passes.
+//
+// The table has shapes the parser must allow for, each pinned so that a format change fails loudly
+// instead of quietly checking fewer rows:
+//   - a row may name several paths in one cell (`server.ts`, `tests/testenv.ts`), and each of them
+//     must map to that row's suites;
+//   - suite names are shorthand (`unit_keys_test` for `tests/unit_keys_test.ts`);
+//   - two prose rows: the entrypoint row says "every non-browser suite" (the fast tier) and the
+//     self-mapping rows say "that suite".
+// Cells naming a glob (`tools/*`) or a placeholder (`tests/<suite>.ts`) are skipped - the concrete
+// paths in those rows are still checked, and those glob arms are pinned by the tooling test below.
+function suiteFromShorthand(token: string): string {
+  return `tests/${token}${token.endsWith("_test") ? "" : "_test"}.ts`;
+}
+
+Deno.test("the docs affected-path table matches what the dispatcher maps", async () => {
+  const doc = await Deno.readTextFile(new URL("../docs/speed.md", import.meta.url));
+  const from = doc.indexOf("## Affected-path mapping");
+  const to = doc.indexOf("## Hermeticity");
+  if (from < 0 || to < from) {
+    throw new Error("docs/speed.md no longer has an ## Affected-path mapping section");
+  }
+  const rows = doc.slice(from, to).split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("|"))
+    // The header and the `| --- | --- |` separator carry no backticks, so they drop out below.
+    .map((line) => line.replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim()))
+    .filter((cells) => cells.length >= 2);
+
+  const fast = (await suites(["--all-suites", "--dry-run"]))
+    .filter((suite) => !NON_FAST_SUITES.includes(suite));
+  if (fast.length === 0) throw new Error("the fast tier resolved to nothing");
+
+  const backticked = (cell: string) => [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+  const concrete = (cell: string) => backticked(cell).filter((t) => /^[A-Za-z0-9_./-]+$/.test(t));
+
+  let checked = 0;
+  for (const [pathCell, suiteCell] of rows) {
+    const paths = concrete(pathCell);
+    if (paths.length === 0) continue; // a heading row, or the "anything else" row
+    let expected: string[];
+    if (/every non-browser suite/.test(suiteCell)) {
+      expected = fast;
+    } else if (/that suite/.test(suiteCell)) {
+      // A self-mapping row: `--map <path>` must return exactly this path.
+      expected = paths;
+    } else {
+      expected = backticked(suiteCell).filter((t) => /_test$/.test(t)).map(suiteFromShorthand);
+      if (expected.length === 0) {
+        throw new Error(
+          `docs/speed.md's row for ${paths.join(", ")} names no suite - has the table's format ` +
+            `changed? (${suiteCell})`,
+        );
+      }
+    }
+    for (const path of paths) {
+      const got = (await suites(["--map", path])).sort();
+      const want = [...expected].sort();
+      if (got.join() !== want.join()) {
+        throw new Error(
+          `docs/speed.md says ${path} runs ${want.join(", ") || "(nothing)"}, but ` +
+            `tools/fast-gate.sh maps it to ${got.join(", ") || "(nothing)"}`,
+        );
+      }
+      checked++;
+    }
+  }
+  // A parser that silently stopped seeing rows (a reflowed table, a renamed column) would make every
+  // assertion above vacuous, so the count is asserted against the table's real shape.
+  if (checked < 10) {
+    throw new Error(
+      `only ${checked} affected-path rows were checked, but docs/speed.md's table names ~15 paths ` +
+        `- has its format changed?`,
     );
   }
 });

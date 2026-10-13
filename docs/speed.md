@@ -49,7 +49,8 @@ value. A per-VM override is sourced second and wins, so a host can retune withou
 tracked file. `deno task test:full` / `test:fast` are aliases of `check` / `check:fast`, kept
 because existing installs and hand-offs name them. After changing any of this,
 `deno task test:guards` proves the dispatcher and the config again — including that an unmapped path
-still fails closed and that `--install` reproduces the tracked values.
+still fails closed, that `--install` reproduces the tracked values, and that every `deno task` name
+these docs tell a reader to run exists in `deno.json`.
 
 Implementers run `fleet-check --fast`. The **full** gate runs once per landing, on the merger's
 merged union — never from an implementer lane while the merger's gate is queued (one heavy slot per
@@ -97,7 +98,9 @@ An empty delta runs every suite: "nothing changed" must never mean "nothing veri
 is self-checking: `tests/gate_mapping_test.ts` walks `git ls-files` and fails if any tracked file is
 unmapped, and proves the fail-closed behaviour with a real unmapped file in the delta. It also
 asserts the full tier is a superset of every affected-tier resolution, so "full includes fast" is
-tested rather than assumed.
+tested rather than assumed. **This table is checked, not just written down**: the guard drives every
+concrete path in it through `--map` and compares the suite sets, so a row that no longer matches
+`map_one()` fails the gate instead of misleading the next reader.
 
 ## Hermeticity
 

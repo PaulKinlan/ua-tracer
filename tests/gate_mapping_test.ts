@@ -369,6 +369,70 @@ Deno.test("the docs suite table and the suites on disk are the same set", async 
   }
 });
 
+// AGENTS.md summarizes the test tiers for developers landing changes. Hand-maintained counts
+// in prose repeatedly drift (ua-tracer-8ce): ajc updated the sentence to 122 tests / 27 guards /
+// 94 code / 14 suites, but test counts drift on every commit that adds a test case and cannot be
+// derived without running the entire test suite. The suite counts (14 suite files: 2 guards,
+// 11 code suites, 1 browser journey), however, describe the tier structure and ARE derivable
+// from disk and tools/fast-gate.sh. This guard asserts that the numbers in AGENTS.md match
+// reality, so a new suite file cannot be added without keeping the doc summary in step.
+Deno.test("the AGENTS.md tier summary matches the derived suite counts", async () => {
+  const agents = await Deno.readTextFile(new URL("../AGENTS.md", import.meta.url));
+  const m = agents.match(
+    /across\s+(\d+)\s+suite files:\s*(\d+)\s+gate guards,\s*(\d+)\s+code(?:\s+suites)?,\s*(\d+)\s+real-browser journey\s+plus\s+`tests\/testenv\.ts`/,
+  );
+  if (!m) {
+    throw new Error(
+      "could not parse tier-summary suite counts in AGENTS.md (expected 'across N suite files: X gate guards, Y code suites, Z real-browser journey plus `tests/testenv.ts`')",
+    );
+  }
+  const statedTotal = Number(m[1]);
+  const statedGuards = Number(m[2]);
+  const statedCode = Number(m[3]);
+  const statedBrowser = Number(m[4]);
+
+  const onDisk = new Set<string>();
+  for await (const entry of Deno.readDir(new URL("../tests", import.meta.url))) {
+    if (entry.isFile && entry.name.endsWith("_test.ts")) onDisk.add(`tests/${entry.name}`);
+  }
+  const allDispatched = await suites(["--all-suites", "--dry-run"]);
+  const fast = allDispatched.filter((s) => !NON_FAST_SUITES.includes(s));
+  const guards = NON_FAST_SUITES.filter((s) => s.includes("gate_"));
+  const browser = NON_FAST_SUITES.filter((s) => s.includes("browser_"));
+
+  if (statedTotal !== onDisk.size) {
+    throw new Error(
+      `AGENTS.md states ${statedTotal} suite files, but tests/ has ${onDisk.size} *_test.ts files`,
+    );
+  }
+  if (statedGuards !== guards.length) {
+    throw new Error(
+      `AGENTS.md states ${statedGuards} gate guards, but dispatcher has ${guards.length} (${
+        guards.join(", ")
+      })`,
+    );
+  }
+  if (statedCode !== fast.length) {
+    throw new Error(
+      `AGENTS.md states ${statedCode} code suites, but dispatcher has ${fast.length} fast suites`,
+    );
+  }
+  if (statedBrowser !== browser.length) {
+    throw new Error(
+      `AGENTS.md states ${statedBrowser} browser suites, but dispatcher has ${browser.length} (${
+        browser.join(", ")
+      })`,
+    );
+  }
+  if (statedGuards + statedCode + statedBrowser !== statedTotal) {
+    throw new Error(
+      `AGENTS.md breakdown (${statedGuards} + ${statedCode} + ${statedBrowser} = ${
+        statedGuards + statedCode + statedBrowser
+      }) does not sum to total ${statedTotal}`,
+    );
+  }
+});
+
 // The two hand-maintained copies of the dispatcher's contract - docs/speed.md's ## Affected-path
 // mapping and AGENTS.md's "### The map is the contract" - are what a lane reads to decide what its
 // change must run, so a stale row is worse than a missing one: it tells the reader their change is

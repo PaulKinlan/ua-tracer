@@ -6,7 +6,7 @@
 // HERMETICITY: every range source except the deliberate fail-closed control is
 // seeded into KV before any test runs, so `getBotRanges` never fetches. The fast
 // suites also run without --allow-net, so a live fetch could not succeed even if
-// the seeding were wrong (it would surface as "unverified", never as "verified").
+// the seeding were wrong (it would surface as "unverifiable", never as "verified").
 
 import { clearKv, seedBotRanges } from "./testenv.ts";
 import { classifyBot } from "../bot-verification.ts";
@@ -116,13 +116,113 @@ Deno.test("injected dependencies isolate CIDR lookup from default cache", async 
   }
 });
 
-Deno.test("an unseeded range source fails closed: unverified, never verified", async () => {
-  // OAI-SearchBot has no KV entry and there is no network in this suite, so
-  // `getBotRanges` cannot resolve a list. The result must be "unverified" -
-  // a missing/failed range fetch must never be able to assert "verified".
+Deno.test("an unseeded range source fails closed as temporarily unverifiable", async () => {
+  // A failed lookup is not evidence that a claimed bot IP is outside its ranges.
   const v = await classifyBot("20.171.207.9", "Mozilla/5.0 (compatible; OAI-SearchBot/1.0)");
-  if (v?.bot !== "OAI-SearchBot") throw new Error(JSON.stringify(v));
-  if (v.status !== "unverified") throw new Error(`expected unverified, got ${v.status}`);
+  if (v?.bot !== "OAI-SearchBot" || v.status !== "unverifiable") {
+    throw new Error(JSON.stringify(v));
+  }
+});
+
+Deno.test("a timed-out range fetch writes no cache and recovers on the next request", async () => {
+  const kv = await Deno.openKv(":memory:");
+  try {
+    let calls = 0;
+    const deps = {
+      getKv: () => Promise.resolve(kv),
+      now: () => 123456789,
+      rangeFetchTimeoutMs: 15,
+      fetch: (_input: RequestInfo | URL, init?: RequestInit) => {
+        calls++;
+        if (calls > 1) {
+          return Promise.resolve(
+            new Response(JSON.stringify({
+              prefixes: [{ ipv4Prefix: "192.0.2.0/24" }],
+            })),
+          );
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+            once: true,
+          });
+        });
+      },
+    };
+    const failed = await classifyBot("192.0.2.7", "Googlebot/2.1", deps);
+    if (failed?.status !== "unverifiable" || !failed.note.includes("unavailable")) {
+      throw new Error(`timeout falsely classed bot as spoofed: ${JSON.stringify(failed)}`);
+    }
+    if ((await kv.get(["botranges", "Googlebot"])).value !== null) {
+      throw new Error("failed range lookup poisoned the KV cache");
+    }
+    const recovered = await classifyBot("192.0.2.7", "Googlebot/2.1", deps);
+    const cached = await classifyBot("192.0.2.7", "Googlebot/2.1", deps);
+    if (recovered?.status !== "verified" || cached?.status !== "verified" || calls !== 2) {
+      throw new Error(`range retry/cache failed: ${JSON.stringify({ recovered, cached, calls })}`);
+    }
+  } finally {
+    kv.close();
+  }
+});
+
+Deno.test("a stalled range response body also times out without caching", async () => {
+  const kv = await Deno.openKv(":memory:");
+  try {
+    const v = await classifyBot("192.0.2.7", "Googlebot/2.1", {
+      getKv: () => Promise.resolve(kv),
+      now: () => 123456789,
+      rangeFetchTimeoutMs: 15,
+      fetch: (_input, init) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), {
+              once: true,
+            });
+          },
+        });
+        return Promise.resolve(new Response(body, { status: 200 }));
+      },
+    });
+    if (v?.status !== "unverifiable") throw new Error(JSON.stringify(v));
+    if ((await kv.get(["botranges", "Googlebot"])).value !== null) {
+      throw new Error("stalled response body populated cache");
+    }
+  } finally {
+    kv.close();
+  }
+});
+
+Deno.test("an expired range cache is not treated as evidence after a failed refresh", async () => {
+  const kv = await Deno.openKv(":memory:");
+  try {
+    await kv.set(["botranges", "Googlebot"], {
+      fetchedAt: 1,
+      prefixes: ["198.51.100.0/24"],
+    });
+    let calls = 0;
+    const deps = {
+      getKv: () => Promise.resolve(kv),
+      now: () => 24 * 60 * 60 * 1000 + 2,
+      fetch: () => {
+        calls++;
+        return Promise.resolve(new Response("service down", { status: 503 }));
+      },
+    };
+    const first = await classifyBot("198.51.100.7", "Googlebot/2.1", deps);
+    const second = await classifyBot("203.0.113.7", "Googlebot/2.1", deps);
+    if (first?.status !== "unverifiable" || second?.status !== "unverifiable" || calls !== 2) {
+      throw new Error(
+        `stale ranges classified as current: ${JSON.stringify({ first, second, calls })}`,
+      );
+    }
+    const row =
+      (await kv.get<{ fetchedAt: number; prefixes: string[] }>(["botranges", "Googlebot"])).value;
+    if (row?.fetchedAt !== 1 || row.prefixes[0] !== "198.51.100.0/24") {
+      throw new Error("failed refresh overwrote the existing range cache");
+    }
+  } finally {
+    kv.close();
+  }
 });
 
 Deno.test("clearing the KV also drops the in-memory range cache", async () => {
@@ -136,7 +236,7 @@ Deno.test("clearing the KV also drops the in-memory range cache", async () => {
   await clearKv();
   const cleared = await classifyBot("66.249.66.7", "Googlebot/2.1");
   // No KV ranges and no `--allow-net`, so it cannot resolve a list.
-  if (cleared?.status !== "unverified") {
+  if (cleared?.status !== "unverifiable") {
     throw new Error(`stale cache after clearKv: ${JSON.stringify(cleared)}`);
   }
 

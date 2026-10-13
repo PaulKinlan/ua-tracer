@@ -52,6 +52,7 @@ const UNVERIFIABLE_BOTS: { name: string; uaMatches: string[] }[] = [
 ];
 
 const BOT_RANGES_TTL_MS = 24 * 60 * 60 * 1000; // refresh cached ranges daily
+const BOT_RANGE_FETCH_TIMEOUT_MS = 5_000; // cold/expired lookups run on GET /
 
 // IPv4 CIDR containment (Deno Deploy client IPs are IPv4 or IPv4-mapped IPv6;
 // IPv6 ranges exist for some bots but are not matched in this first version).
@@ -83,6 +84,7 @@ export interface BotDependencies {
   getKv?: () => Promise<Deno.Kv>;
   fetch?: typeof fetch;
   now?: () => number;
+  rangeFetchTimeoutMs?: number; // injectable to keep timeout tests fast
 }
 let _rangeCache: Map<string, { fetchedAt: number; prefixes: string[] }> | null = null;
 
@@ -93,13 +95,13 @@ export function resetBotRangeCache(): void {
 async function getBotRanges(
   source: { name: string; url: string },
   deps: BotDependencies,
-): Promise<string[]> {
+): Promise<string[] | null> {
   const now = (deps.now ?? Date.now)();
   const cache = Object.keys(deps).length
     ? new Map<string, { fetchedAt: number; prefixes: string[] }>()
     : (_rangeCache ??= new Map());
   const cached = cache.get(source.name);
-  if (cached && now - cached.fetchedAt < BOT_RANGES_TTL_MS) {
+  if (cached?.prefixes.length && now - cached.fetchedAt < BOT_RANGES_TTL_MS) {
     return cached.prefixes;
   }
   // KV-backed cache so isolates share the ranges and survive restarts.
@@ -108,20 +110,23 @@ async function getBotRanges(
   const kvEntry = await kv.get<{ fetchedAt: number; prefixes: string[] }>(key);
   let prefixes = kvEntry.value?.prefixes;
   let fetchedAt = kvEntry.value?.fetchedAt ?? 0;
-  if (!prefixes || now - fetchedAt >= BOT_RANGES_TTL_MS) {
+  if (!prefixes?.length || now - fetchedAt >= BOT_RANGES_TTL_MS) {
     try {
-      const res = await (deps.fetch ?? fetch)(source.url);
+      const signal = AbortSignal.timeout(deps.rangeFetchTimeoutMs ?? BOT_RANGE_FETCH_TIMEOUT_MS);
+      const res = await (deps.fetch ?? fetch)(source.url, { signal });
+      if (!res.ok) throw new Error(`range fetch HTTP ${res.status}`);
       const json = await res.json() as {
-        prefixes: Array<{ ipv4Prefix?: string; ipv6Prefix?: string }>;
+        prefixes?: Array<{ ipv4Prefix?: string; ipv6Prefix?: string }>;
       };
-      prefixes = json.prefixes
-        .map((p) => p.ipv4Prefix ?? p.ipv6Prefix ?? "")
+      prefixes = json.prefixes?.map((p) => p.ipv4Prefix ?? p.ipv6Prefix ?? "")
         .filter((p) => p.length > 0);
+      if (!prefixes?.length) throw new Error("range source returned no prefixes");
       fetchedAt = now;
       await kv.set(key, { fetchedAt, prefixes });
     } catch (_e) {
-      // Network/parse failure: fall back to whatever we have, even if stale.
-      if (!prefixes) prefixes = [];
+      // A failed lookup (including a stale cache) is not proof of a spoofed bot.
+      // Do not cache an empty set: the next request must be able to retry.
+      return null;
     }
   }
   cache.set(source.name, { fetchedAt, prefixes });
@@ -140,6 +145,13 @@ export async function classifyBot(
   for (const source of BOT_RANGE_SOURCES) {
     if (source.uaMatches.some((m) => uaLower.includes(m.toLowerCase()))) {
       const ranges = await getBotRanges(source, deps);
+      if (!ranges) {
+        return {
+          bot: source.name,
+          status: "unverifiable",
+          note: `${source.name} published ranges temporarily unavailable`,
+        };
+      }
       const ipInt = ipv4ToInt(ipNorm);
       const inRange = ipInt !== null &&
         ranges.some((r) => r.includes(".") && cidrContains4(r, ipInt));

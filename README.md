@@ -69,8 +69,9 @@ published CIDR lists daily and tags every bot hit:
 
 - **verified** — the UA claims bot X and the client IP falls inside X's published range.
 - **unverified** — the UA claims bot X but the IP is **not** in the range (a likely spoof).
-- **unverifiable** — the UA claims a bot whose operator publishes **no** ranges, so the claim can't
-  be checked either way.
+- **unverifiable** — the UA claims a bot whose operator publishes **no** ranges, or its published
+  ranges are temporarily unavailable; the claim can't be checked either way. Cold/expired fetches
+  have a five-second deadline and retry on the next request without caching failed results.
 
 Operators with published ranges that ua-tracer verifies against: **Googlebot, GPTBot, OAI-SearchBot,
 Bingbot, ClaudeBot / Claude-User / Claude-SearchBot** (Anthropic publishes one list for all three),

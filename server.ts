@@ -27,6 +27,7 @@ import {
   logProbe,
   recentProbes,
   recentTraces,
+  redactHeaders,
   type ResourceTiming,
   searchTracesByUa,
   seedTrace,
@@ -68,7 +69,7 @@ export function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
 function headersToObject(headers: Headers): Record<string, string> {
   const obj: Record<string, string> = {};
   for (const [k, v] of headers.entries()) obj[k] = v;
-  return obj;
+  return redactHeaders(obj);
 }
 
 // Common HTTP headers for responses from the route handlers.

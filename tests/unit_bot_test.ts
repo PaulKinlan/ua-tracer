@@ -102,7 +102,9 @@ Deno.test("a claimed bot with no trusted address is unverifiable, never a spoof"
     }
     if (!v.note.includes("no trusted client address")) throw new Error(v.note);
     if (kvReads !== 0 || fetches !== 0) {
-      throw new Error(`looked up ranges for an address we never had: kv=${kvReads} fetch=${fetches}`);
+      throw new Error(
+        `looked up ranges for an address we never had: kv=${kvReads} fetch=${fetches}`,
+      );
     }
   } finally {
     kv.close();

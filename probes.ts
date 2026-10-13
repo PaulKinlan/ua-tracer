@@ -357,31 +357,42 @@ export const ran = true;
 // ---------------------------------------------------------------------------
 
 // Asset paths map to the frozen hit kinds used in KV and detail views.
+//
+// This map is the RECORDED kind universe (ua-tracer-wot): the badge lists in views.ts derive from it,
+// so a kind added here cannot be silently dropped from the UI. It used to be a local inside
+// assetKind(), which let three places hold the kind set independently - this map, SHORT_KIND and
+// KIND_ORDER - and a kind added to only one of them was recorded in KV and then vanished from the
+// Fetched badges with no compile error and no failing test.
+export const PROBE_KIND_BY_ASSET: Record<string, AssetKind> = {
+  "style.css": "css",
+  "main.js": "js",
+  "photo.png": "img",
+  "font.woff2": "font",
+  "css-bg.png": "css-bg",
+  "css-font.woff2": "css-font",
+  "js-ran.gif": "js-ran",
+  "timing": "timing",
+  "favicon.ico": "favicon",
+  "apple-touch-icon.png": "apple-icon",
+  "manifest.json": "manifest",
+  "manifest-icon.png": "manifest-icon",
+  "preload.png": "preload",
+  "prefetch.png": "prefetch",
+  "module.js": "module",
+  "module-ran.gif": "module-ran",
+  "og-image.png": "og-image",
+  "twitter-image.png": "twitter-image",
+  "iframe": "iframe",
+  "iframe-img.png": "iframe-img",
+  "import.css": "css-import",
+  "csp-report": "csp-report",
+  "report": "report",
+};
+
+// Every kind a probe can actually record, in the order the map declares them. DERIVED, so it cannot
+// drift from the recorder the way a hand-written second list does.
+export const PROBE_KINDS: readonly AssetKind[] = [...new Set(Object.values(PROBE_KIND_BY_ASSET))];
+
 export function assetKind(asset: string): AssetKind | undefined {
-  const map: Record<string, AssetKind> = {
-    "style.css": "css",
-    "main.js": "js",
-    "photo.png": "img",
-    "font.woff2": "font",
-    "css-bg.png": "css-bg",
-    "css-font.woff2": "css-font",
-    "js-ran.gif": "js-ran",
-    "timing": "timing",
-    "favicon.ico": "favicon",
-    "apple-touch-icon.png": "apple-icon",
-    "manifest.json": "manifest",
-    "manifest-icon.png": "manifest-icon",
-    "preload.png": "preload",
-    "prefetch.png": "prefetch",
-    "module.js": "module",
-    "module-ran.gif": "module-ran",
-    "og-image.png": "og-image",
-    "twitter-image.png": "twitter-image",
-    "iframe": "iframe",
-    "iframe-img.png": "iframe-img",
-    "import.css": "css-import",
-    "csp-report": "csp-report",
-    "report": "report",
-  };
-  return map[asset];
+  return PROBE_KIND_BY_ASSET[asset];
 }

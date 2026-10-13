@@ -50,7 +50,7 @@ moves modules and must update the map rather than silently making this page fals
 | Guards only | `deno task test:guards`                  | —                                                                                    | When you touch the gate, the config or this file.                                                    |
 
 `deno task check:all` (fmt `--check`, lint, `deno check`) is included in both tiers. The tiers run
-122 tests: 27 gate guards, 94 code, 1 real-browser journey across 14 suite files plus
+across 14 suite files: 2 gate guards, 11 code suites, 1 real-browser journey plus
 `tests/testenv.ts`.
 
 `fleet-check` refuses the full gate from a non-merger lane in its own words ("the FULL gate is the

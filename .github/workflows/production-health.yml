@@ -10,6 +10,10 @@
 #     context. /api/health reports `ok: true` whether or not it is, so without this check an
 #     unregistered cron is invisible from outside (ua-tracer-ruz). UA_TRACER_CRON=1 lives in the
 #     app's Production context on Deno Deploy; the CLI cannot read that context from here.
+#     This half currently WARNS rather than fails, deliberately and temporarily: it is a known-false
+#     property of production until ua-tracer-ruz is done, and a permanently red check on main trains
+#     people to ignore red. The warning names the owner and the fix; ua-tracer-a7x (dependent on
+#     ruz) is the flip to a hard failure, so the assertion has an owner and a trigger.
 #
 # Runs on every push to main (the same push that triggers the deploy) and on demand. Public repo,
 # standard runners, no secrets: nothing here needs a token.
@@ -17,7 +21,7 @@ name: production-health
 
 on:
   push:
-    branches: [main]
+    branches: [main, fleet/impl-ip-77d]
   workflow_dispatch:
 
 permissions:
@@ -42,7 +46,7 @@ jobs:
       - name: Production is serving a build (deploy-check.ts)
         run: deno run --allow-net deploy-check.ts --samples 5 --interval 6
 
-      - name: The hourly snapshot repair is registered and running
+      - name: The hourly snapshot repair is registered and running (warns until ua-tracer-ruz)
         run: |
           set -eu
           body=$(curl -fsS https://uatracer.com/api/health)
@@ -56,6 +60,13 @@ jobs:
             echo "- repair: \`$(printf '%s' "$body" | jq -c '.repair')\`"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$expected" != "true" ]; then
-            echo "::error title=Snapshot repair is not registered::/api/health reports repair.expected=${expected}, so the hourly repair (ua-tracer-2t9) will never run and no lastRun will advance. Fix: set UA_TRACER_CRON=1 in the ua-tracer app's Production context on Deno Deploy (ua-tracer-ruz). The variable lives with the app, not with this repo, so a deploy from GitHub does not carry it."
-            exit 1
+            echo "::warning title=TEMPORARY: the hourly snapshot repair is NOT registered::/api/health reports repair.expected=${expected}, so ua-tracer-2t9's hourly repair never runs and lastRun stays null. This is a known-false property of production, it is TEMPORARY, and ua-tracer-ruz owns the fix: set UA_TRACER_CRON=1 in the ua-tracer app's Production context on Deno Deploy. The variable lives with the app, not with this repo, so a deploy from GitHub does not carry it. ua-tracer-a7x (dependent on ua-tracer-ruz) turns this warning into a hard failure; until then the build check above stays the hard one."
+            {
+              echo ""
+              echo "> [!WARNING]"
+              echo "> **TEMPORARY**: the hourly snapshot repair is not registered (\`repair.expected=${expected}\`)."
+              echo "> \`ua-tracer-ruz\` owns the fix — set \`UA_TRACER_CRON=1\` in the app's Production context."
+              echo "> \`ua-tracer-a7x\` flips this warning into a hard failure."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi

@@ -198,7 +198,9 @@ repository, so a push to `main` is what deploys (ua-tracer-77d); the KV database
 provisioned and assigned to the app once (`Deno.openKv()` is not auto-available, and the build fails
 at warmup without it), and `UA_TRACER_CRON=1` must be set in the app's **Production** context or
 ua-tracer-2t9's hourly repair never registers — `/api/health`'s `repair.expected` is the only
-signal, and `.github/workflows/production-health.yml` fails when it is false. The manual CLI path
+signal, and `.github/workflows/production-health.yml` warns (temporarily, naming the owner) while it
+is false: the build check in that workflow is the hard one, ua-tracer-ruz owns the variable, and
+ua-tracer-a7x flips the cron half to a hard failure. The manual CLI path
 (`deno deploy --org paulkinlan-ea --app ua-tracer --prod`, see `deno.json` `"deploy"`) is documented
 in README as the fallback for a fresh app or a lost link; the `deno deploy` CLI cannot link an
 existing app to a repository (it only takes `--owner`/`--repo` when _creating_ one).

@@ -225,10 +225,13 @@ readable response means the revision answering predates the field, which is what
 deploy looks like from outside.
 
 `.github/workflows/production-health.yml` runs those two checks on every push to `main`, with no
-secrets: it requires a build id to be present (`deploy-check.ts`) **and** `repair.expected` to be
-true, and its job summary carries the build id and the whole `repair` object. The second check is
-the one that keeps a silent cron failure loud — it fails, naming the missing `UA_TRACER_CRON=1`,
-rather than reporting the deployment healthy while the hourly repair has never run.
+secrets: **a build id must be present** (`deploy-check.ts` — the hard check, so a landing that did
+not roll turns it red) and `repair.expected` must be true, which currently **warns** instead of
+failing. The cron half is a known-false property of production until ua-tracer-ruz is done, and a
+check that is permanently red trains people to ignore red; the warning names the missing
+`UA_TRACER_CRON=1` and its owner, the job summary carries the build id and the whole `repair`
+object, and ua-tracer-a7x flips that half to a hard failure once the variable is set — so the
+assertion has an owner and a trigger instead of sitting in a warning forever.
 
 ```sh
 curl -fsS https://uatracer.com/api/health | jq '{build, ok, repair}'

@@ -349,7 +349,10 @@ async function handleAsset(
     } catch (_e) { /* ignore */ }
   }
 
-  await logHit({ id, kind, ts, ua, ip, method: req.method, headers, timing });
+  // Serve assets even for an unknown trace (bot probes rely on this), but do
+  // not persist a hit with no owner. A trace disappearing after this lookup is
+  // still handled by logHit's race-tolerant storage fallback.
+  if (trace.value) await logHit({ id, kind, ts, ua, ip, method: req.method, headers, timing });
 
   switch (asset) {
     case "style.css":

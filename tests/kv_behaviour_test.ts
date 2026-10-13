@@ -134,7 +134,7 @@ Deno.test("the UA display name keeps the original casing", async () => {
   if (agg?.ua !== "CasingBot/1.0") throw new Error(`display name ${agg?.ua}`);
 });
 
-Deno.test("a probe carrying a secret for an unknown trace id is served, not 404", async () => {
+Deno.test("an unknown-trace secret probe is served without persisting an orphan hit", async () => {
   await clearKv();
   const res = await handler(req("/r/unknowntrace/somesecret/style.css"));
   if (res.status !== 200) throw new Error(`status ${res.status}`);
@@ -142,7 +142,7 @@ Deno.test("a probe carrying a secret for an unknown trace id is served, not 404"
   const kv = await testKv();
   let hits = 0;
   for await (const _entry of kv.list<HitRecord>({ prefix: ["hit", "unknowntrace"] })) hits++;
-  if (hits !== 1) throw new Error(`expected the hit to be logged, got ${hits}`);
+  if (hits !== 0) throw new Error(`unknown trace wrote ${hits} orphan hit(s)`);
   // No trace record means no stats entry is invented.
   if (await countPrefix(["recent"]) !== 0) throw new Error("stats entry created for unknown trace");
 });

@@ -210,6 +210,35 @@ Deno.test("a wrong or absent secret 404s and logs nothing", async () => {
   if (after !== before) throw new Error("a rejected probe was still logged");
 });
 
+Deno.test("unknown trace probes still serve assets without persisting orphan hits", async () => {
+  await clearKv();
+  const id = "missingtrace";
+  for (
+    const path of [
+      `/r/${id}/style.css`,
+      `/r/${id}/fake-secret/style.css`,
+      `/r/${id}/fake-secret/timing`,
+    ]
+  ) {
+    const isTiming = path.endsWith("/timing");
+    const res = await handler(req(
+      path,
+      isTiming
+        ? {
+          method: "POST",
+          body: JSON.stringify({ entries: [{ name: "orphan.css", startTime: 1, duration: 2 }] }),
+        }
+        : {},
+    ));
+    if (res.status !== 200) throw new Error(`${path} -> ${res.status}`);
+    await res.text();
+  }
+  const hitCount = (await hitsOf(id)).length;
+  if (hitCount !== 0 || await countPrefix(["hit"]) !== 0) {
+    throw new Error(`unknown trace wrote ${hitCount} orphan hit(s) for three probe requests`);
+  }
+});
+
 Deno.test("a legacy trace (no secret) still serves the /r/{id}/ probe path", async () => {
   await clearKv();
   const kv = await testKv();

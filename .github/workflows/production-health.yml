@@ -17,7 +17,7 @@ name: production-health
 
 on:
   push:
-    branches: [main, fleet/impl-ip-77d]
+    branches: [main]
   workflow_dispatch:
 
 permissions:

@@ -76,9 +76,10 @@ function peerIp(info?: Deno.ServeHandlerInfo): string | null {
 // itself (x-forwarded-for, then x-real-ip) so a handler called without connection
 // metadata still records something. Deno Deploy adds no forwarding header of its
 // own — measured on the live deployment 2026-10-13: a request sending none
-// arrives with none, and a client-supplied x-forwarded-for arrives verbatim — so
-// a claimed address is client-controlled text and must never decide a verdict.
-// See verificationIp().
+// arrives with none, and a client-supplied x-forwarded-for arrives verbatim, so
+// neither the first nor the last element of a chain is platform-set — therefore a
+// claimed address is client-controlled text. It may be recorded; it must never
+// decide a verdict. `handleHomepage` takes its verification IP from `peerIp`.
 export function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
   const peer = peerIp(info);
   if (peer) return peer;
@@ -87,14 +88,6 @@ export function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
   const real = req.headers.get("x-real-ip");
   if (real) return unmapIpv4(real.trim());
   return "unknown";
-}
-
-// The IP a bot verdict may be based on. Only the connection peer qualifies; when
-// the runtime reports no peer the answer is a value that can never match a
-// published range, so a forged forwarding header cannot turn a claimed bot into a
-// verified one.
-export function verificationIp(info?: Deno.ServeHandlerInfo): string {
-  return peerIp(info) ?? "unknown";
 }
 
 function headersToObject(headers: Headers): Record<string, string> {
@@ -491,7 +484,11 @@ async function handleAsset(
   }
 }
 
-async function handleHomepage(req: Request, ip: string, verdictIp: string): Promise<Response> {
+async function handleHomepage(
+  req: Request,
+  ip: string,
+  trustedIp: string | null,
+): Promise<Response> {
   const ua = req.headers.get("user-agent") ?? "";
   const headers = headersToObject(req.headers);
   // Derive the public origin for copy-pasteable examples. Honour the proxy's
@@ -532,9 +529,10 @@ async function handleHomepage(req: Request, ip: string, verdictIp: string): Prom
     const ts = Date.now();
     // IP-range verification against published bot ranges (Google, OpenAI,
     // Bing). ClaudeBot/ChatGPT-User publish no ranges and are tagged
-    // "unverifiable" — their UA is unfalsifiable. The IP is `verdictIp`, never a
-    // header-derived value: the client must not be able to mint its own verdict.
-    const verified = await classifyBot(verdictIp, ua);
+    // "unverifiable" — their UA is unfalsifiable. The IP is `trustedIp`, the
+    // connection peer, or null when the runtime reported none: the client must
+    // not be able to mint its own verdict from a header it wrote itself.
+    const verified = await classifyBot(trustedIp, ua);
     const rec: TraceRecord = {
       id,
       ts,
@@ -904,7 +902,7 @@ async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise
 
   // Homepage.
   if (path === "/" && (req.method === "GET" || req.method === "HEAD")) {
-    return await handleHomepage(req, ip, verificationIp(info));
+    return await handleHomepage(req, ip, peerIp(info));
   }
 
   const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? url.host;

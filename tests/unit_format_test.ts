@@ -10,7 +10,6 @@ import {
   fmtTs,
   ipv4ToInt,
   uaHeadline,
-  verificationIp,
 } from "../server.ts";
 
 Deno.test("escapeHtml neutralises the five HTML-significant characters", () => {
@@ -86,6 +85,15 @@ Deno.test("clientIp is the connection peer, not a claim the request makes about 
   );
   if (spoofed !== "203.0.113.7") throw new Error(`peer lost to a header -> ${spoofed}`);
 
+  // The classic prepend: a fabricated hop first in the chain. Still not the peer.
+  const chain = clientIp(
+    new Request("https://uatracer.com/", {
+      headers: { "x-forwarded-for": "66.249.66.1, 198.51.100.99, 10.0.0.1" },
+    }),
+    peer("203.0.113.7"),
+  );
+  if (chain !== "203.0.113.7") throw new Error(`chain hop beat the peer -> ${chain}`);
+
   // IPv4-mapped peers are normalised so cidrContains4 can match them.
   const mapped = clientIp(new Request("https://uatracer.com/"), peer("::ffff:203.0.113.7"));
   if (mapped !== "203.0.113.7") throw new Error(`IPv4-mapped peer -> ${mapped}`);
@@ -106,17 +114,6 @@ Deno.test("clientIp is the connection peer, not a claim the request makes about 
 
   const none = clientIp(new Request("https://uatracer.com/"));
   if (none !== "unknown") throw new Error(`no address -> ${none}`);
-});
-
-Deno.test("verificationIp only ever returns the peer, so a header cannot decide a verdict", () => {
-  if (verificationIp(peer("66.249.66.1")) !== "66.249.66.1") {
-    throw new Error("peer not used for verification");
-  }
-  // No connection metadata, however loud the request is about its own address.
-  const noPeer = verificationIp();
-  if (noPeer !== "unknown") throw new Error(`headers influenced the verdict IP -> ${noPeer}`);
-  // "unknown" is not a dotted quad, so it can never match a published range.
-  if (ipv4ToInt(noPeer) !== null) throw new Error("the no-peer verdict IP is matchable");
 });
 
 Deno.test("ipv4ToInt rejects anything that is not a dotted quad", () => {

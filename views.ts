@@ -506,7 +506,7 @@ function verifiedBadge(v?: BotVerification | null): string {
   }
   return `<span class="badge unverifiable" title="${title}">? ${
     escapeHtml(v.bot)
-  } (no ranges)</span>`;
+  } unverifiable</span>`;
 }
 
 // Render the recent-requests rows: a main row (timestamp, UA, assets) plus
@@ -1106,9 +1106,8 @@ browser-grade engine, not just a downloader.</p>
           ? "✓ verified " + escapeHtml(trace.verified.bot)
           : trace.verified.status === "unverified"
           ? "⚠ NOT in " + escapeHtml(trace.verified.bot) + " range (spoofed?)"
-          : "? " + escapeHtml(trace.verified.bot) + " (no published ranges)"
-      }</span> <span class="muted">IP checked against published bot CIDR ranges; ` +
-        escapeHtml(trace.verified.note) + `.</span>`
+          : "? " + escapeHtml(trace.verified.bot) + " unverifiable"
+      }</span> <span class="muted">${escapeHtml(trace.verified.note)}.</span>`
       : `<span class="muted">Not a known bot (no IP-range check applies).</span>`
   }</p>
 ${summary}

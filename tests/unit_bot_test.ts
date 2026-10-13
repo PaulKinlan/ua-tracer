@@ -78,6 +78,24 @@ Deno.test("bots that publish no ranges are unverifiable, not unverified", async 
   }
 });
 
+Deno.test("a claimed bot with no trusted address is unverifiable, never a spoof", async () => {
+  // `null` = the runtime reported no connection peer. Naming the family is still
+  // useful; asserting a verdict is not. And no range may be fetched to get there:
+  // the answer cannot depend on them, so a fetch would be a network call on the
+  // request path for nothing.
+  let fetched = false;
+  const v = await classifyBot(null, "Mozilla/5.0 (compatible; Googlebot/2.1)", {
+    fetch: (() => {
+      fetched = true;
+      return Promise.reject(new Error("ranges must not be fetched"));
+    }) as typeof fetch,
+  });
+  if (v?.bot !== "Googlebot" || v.status !== "unverifiable") {
+    throw new Error(JSON.stringify(v));
+  }
+  if (fetched) throw new Error("ranges were fetched for an address we never had");
+});
+
 Deno.test("Applebot resolves against Apple's published ranges", async () => {
   const v = await classifyBot("17.241.208.20", "Mozilla/5.0 (compatible; Applebot/0.1)");
   if (v?.bot !== "Applebot" || v.status !== "verified") throw new Error(JSON.stringify(v));

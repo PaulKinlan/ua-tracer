@@ -144,6 +144,14 @@ Two things a lane must not break:
   `ua-tracer-trace` cookie reuses that trace instead of minting a new one (a second browser load is
   not automatically a second trace). `csp-report` / `report` POSTs are answered `204` and their body
   is captured under `["x-report-body", …]`.
+- **Probe-hit write contract (`handleAsset`):** a recognized asset writes a hit only when its trace
+  exists at the handler lookup and, for a secret-bearing trace, the URL supplies the matching
+  secret. An unknown trace still serves recognized assets for bot probes but writes nothing; a wrong
+  secret or legacy URL on a secret-bearing trace, or an unknown asset, returns 404 and writes
+  nothing (pinned in `tests/http_test.ts`). A secretless legacy trace accepts either URL shape: an
+  extra supplied secret segment is ignored because there is no secret to protect. `logHit` makes a
+  second KV lookup and deliberately records a real probe if the trace vanished after the handler
+  lookup; unlike a trace absent from the outset, that race must not lose the hit.
 - Every asset/probe hit is recorded with the UA, IP, headers and server timestamp; a bot hit is
   tagged **verified** (UA claims bot X and the IP is inside X's published range), **unverified**
   (claims X, the checked IP is not — a spoof) or **unverifiable** (X publishes no ranges, or no

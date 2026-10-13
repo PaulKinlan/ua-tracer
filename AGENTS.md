@@ -16,25 +16,28 @@ owns the route table, the HTTP semantics (canonical redirect, HEAD, security hea
 refresh and `Deno.serve` under `import.meta.main`. The request-time work behind it is split by
 responsibility, and which top-level modules exist is whatever `git ls-files '*.ts'` says — at the
 time of writing that is the table below. **Every one of them must appear in `map_one()` in
-`tools/fast-gate.sh`**; do not mirror the tree in this file, because a refactor moves modules and
-must update the map rather than silently making this page false.
+`tools/fast-gate.sh`**, and in the table below: `tests/gate_mapping_test.ts` fails when a tracked
+top-level `.ts` module is missing from either, which is how `crons.ts` went unmentioned on this page
+for as long as it existed (ua-tracer-qir). Do not mirror the tree by hand elsewhere — a refactor
+moves modules and must update the map rather than silently making this page false.
 
-| Path                                  | What it is                                                                                                                          |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `server.ts`                           | The entrypoint: routing, request/response semantics, the probe-hit write path, `handler`, `Deno.serve`.                             |
-| `storage.ts`                          | The stable KV schema and trace/probe persistence (key builders, `getKv()`, `casRetry`, listing). No HTTP entrypoint imports.        |
-| `bot-verification.ts`                 | Published bot CIDR verification and the `verified` / `unverified` / `unverifiable` verdict; range fetch + cache.                    |
-| `probes.ts`                           | The probe URL contract and the generated resource bodies (CSS/JS/PNG/GIF/woff2/manifest/iframe).                                    |
-| `views.ts`                            | Pure HTML rendering for the pages; storage and network access belong to the entrypoint.                                             |
-| `backfill.ts`, `backfill-verified.ts` | One-off maintenance over stored traces (`deno task backfill`, `backfill-verify`); both importable, bodies under `import.meta.main`. |
-| `tools/fast-gate.sh`                  | The affected-path dispatcher. **The only place the path→suite map exists.**                                                         |
-| `tools/full-gate.sh`                  | Thin wrapper: `fast-gate.sh --all-suites`.                                                                                          |
-| `tools/check.conf`                    | Tracked gate commands + budgets (source of truth for the VM config).                                                                |
-| `tools/check-cmd.sh`                  | Prints the resolved gate values; `--install` writes `~/.fleet/check.conf`.                                                          |
-| `tests/`                              | The suites, plus `tests/testenv.ts` (redirects `Deno.openKv` to `:memory:`).                                                        |
-| `docs/speed.md`                       | Budgets, mapping table, hermeticity rules, measured timings.                                                                        |
-| `artifacts/`                          | Gitignored browser-journey output (screenshot, `summary.json`, Chrome profile).                                                     |
-| `AGENTS.md`                           | This file — the durable rules, not a mirror of the tree.                                                                            |
+| Path                                  | What it is                                                                                                                                               |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server.ts`                           | The entrypoint: routing, request/response semantics, the probe-hit write path, `handler`, `Deno.serve`.                                                  |
+| `storage.ts`                          | The stable KV schema and trace/probe persistence (key builders, `getKv()`, `casRetry`, listing). No HTTP entrypoint imports.                             |
+| `bot-verification.ts`                 | Published bot CIDR verification and the `verified` / `unverified` / `unverifiable` verdict; range fetch + cache.                                         |
+| `probes.ts`                           | The probe URL contract and the generated resource bodies (CSS/JS/PNG/GIF/woff2/manifest/iframe).                                                         |
+| `views.ts`                            | Pure HTML rendering for the pages; storage and network access belong to the entrypoint.                                                                  |
+| `crons.ts`                            | The scheduled snapshot-repair pass: its `Deno.cron` registration from the entrypoint, the run record it writes, and what `/api/health` reports about it. |
+| `backfill.ts`, `backfill-verified.ts` | One-off maintenance over stored traces (`deno task backfill`, `backfill-verify`); both importable, bodies under `import.meta.main`.                      |
+| `tools/fast-gate.sh`                  | The affected-path dispatcher. **The only place the path→suite map exists.**                                                                              |
+| `tools/full-gate.sh`                  | Thin wrapper: `fast-gate.sh --all-suites`.                                                                                                               |
+| `tools/check.conf`                    | Tracked gate commands + budgets (source of truth for the VM config).                                                                                     |
+| `tools/check-cmd.sh`                  | Prints the resolved gate values; `--install` writes `~/.fleet/check.conf`.                                                                               |
+| `tests/`                              | The suites, plus `tests/testenv.ts` (redirects `Deno.openKv` to `:memory:`).                                                                             |
+| `docs/speed.md`                       | Budgets, mapping table, hermeticity rules, measured timings.                                                                                             |
+| `artifacts/`                          | Gitignored browser-journey output (screenshot, `summary.json`, Chrome profile).                                                                          |
+| `AGENTS.md`                           | This file — the durable rules, not a mirror of the tree.                                                                                                 |
 
 ## The gate
 
@@ -70,20 +73,24 @@ naming every unmapped path) on a path it does not know. So:
 > _every_ lane's branch, not just yours.
 
 The authoritative map is `map_one()` in `tools/fast-gate.sh`; the table below and the one in
-`docs/speed.md` are copies for readers, so a change to the map is a change to all three.
+`docs/speed.md` are copies for readers, so a change to the map is a change to all three. That is
+asserted rather than asked for: `tests/gate_mapping_test.ts` drives both tables through `--map` and
+requires every tracked top-level module to have a row in each of them (ua-tracer-1yo,
+ua-tracer-qir).
 
-| Changed path                                                                        | Suites                                                               |
-| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `server.ts`, `tests/testenv.ts`                                                     | every non-browser suite                                              |
-| `storage.ts` (KV schema)                                                            | `unit_keys`, `kv_behaviour`, `backfill`, `backfill_verified`, `http` |
-| `bot-verification.ts`                                                               | `unit_bot`, `unit_format`, `backfill_verified`, `http`               |
-| `probes.ts`                                                                         | `unit_probes`, `http`, `kv_behaviour`                                |
-| `views.ts`                                                                          | `unit_views`, `unit_format`, `http`                                  |
-| `backfill.ts`                                                                       | `backfill_test`                                                      |
-| `backfill-verified.ts`                                                              | `backfill_verified_test`, `unit_bot_test`                            |
-| `tests/<suite>.ts`                                                                  | that suite (a changed browser suite runs the browser journey)        |
-| `deno.json`, `.gitignore`, `LICENSE`, `README.md`, `AGENTS.md`, `docs/*`, `tools/*` | `gate_mapping_test`                                                  |
-| anything else                                                                       | **exit 2, fail closed**                                              |
+| Changed path                                                                        | Suites                                                                                                      |
+| ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `server.ts`, `tests/testenv.ts`                                                     | every non-browser suite                                                                                     |
+| `storage.ts` (KV schema)                                                            | `unit_keys`, `kv_behaviour`, `backfill`, `backfill_verified`, `http`                                        |
+| `bot-verification.ts`                                                               | `unit_bot`, `unit_format`, `backfill_verified`, `http`                                                      |
+| `probes.ts`                                                                         | `unit_probes`, `http`, `kv_behaviour`                                                                       |
+| `views.ts`                                                                          | `unit_views`, `unit_format`, `http`                                                                         |
+| `backfill.ts`                                                                       | `backfill_test`                                                                                             |
+| `backfill-verified.ts`                                                              | `backfill_verified_test`, `unit_bot_test`                                                                   |
+| `crons.ts`                                                                          | `cron_test`, `http_test`, `gate_mapping_test` (the repair schedule and what `/api/health` reports about it) |
+| `tests/<suite>.ts`                                                                  | that suite (a changed browser suite runs the browser journey)                                               |
+| `deno.json`, `.gitignore`, `LICENSE`, `README.md`, `AGENTS.md`, `docs/*`, `tools/*` | `gate_mapping_test`                                                                                         |
+| anything else                                                                       | **exit 2, fail closed**                                                                                     |
 
 Both guard suites (`gate_mapping_test`, `gate_config_test`) run on every invocation. An empty delta
 runs everything: "nothing changed" must never mean "nothing verified".

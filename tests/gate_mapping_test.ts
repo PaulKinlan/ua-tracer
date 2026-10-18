@@ -958,8 +958,20 @@ Deno.test("the reserved evidence namespace is declared in storage and enforced a
   if (withEvidenceAt < 0 || !withEvidence.includes("clientHeaders(rec.headers)")) {
     throw new Error("withEvidence no longer applies clientHeaders to the caller's headers");
   }
-  if (!withEvidence.includes("isSyntheticHeaderName(name)")) {
+  // The channel checks the reservation on the NORMALISED spelling, and stores under it:
+  // HTTP header names are case-insensitive, so a guard that inspected the caller's
+  // spelling would pass "X-Report-Body" and then keep it, hiding the annotation from
+  // every canonical-key reader and from stripPayload (ua-tracer-t8v, ua-tracer-bns).
+  if (!withEvidence.includes("const key = name.toLowerCase();")) {
+    throw new Error("the evidence channel no longer normalises the name it checks");
+  }
+  if (!withEvidence.includes("isSyntheticHeaderName(key)")) {
     throw new Error("the evidence channel no longer checks the reserved namespace");
+  }
+  if (!withEvidence.includes("headers[key] = value")) {
+    throw new Error(
+      "the evidence channel stores the caller's spelling instead of the canonical one",
+    );
   }
 });
 

@@ -571,16 +571,23 @@ export function hitKeyFor(id: string, tsNanos: bigint): Deno.KvKey {
  *    `evidence` argument, which makes "where did this annotation come from" greppable.
  *    A non-reserved name there is a caller bug: the probe is kept, the misnamed
  *    annotation is dropped with a warning rather than throwing on the request path.
+ *  - an evidence name is STORED under its canonical lowercase spelling. HTTP header
+ *    names are case-insensitive, so "X-Report-Body" is the same header as
+ *    "x-report-body" - but every reader of the reservation asks for the exact
+ *    `EVIDENCE_KEYS` literal (views.ts) and `stripPayload` deletes only that literal, so
+ *    storing the caller's spelling would hide the annotation from the view and make an
+ *    over-budget body survive the strip (ua-tracer-t8v, ua-tracer-bns).
  */
 function withEvidence(rec: HitRecord, evidence: HitEvidence): HitRecord {
   const headers = clientHeaders(rec.headers);
   for (const [name, value] of Object.entries(evidence)) {
     if (value === undefined) continue;
-    if (!isSyntheticHeaderName(name)) {
+    const key = name.toLowerCase();
+    if (!isSyntheticHeaderName(key)) {
       console.warn(`[hit] dropped non-reserved evidence header "${name}" on trace ${rec.id}`);
       continue;
     }
-    headers[name] = value;
+    headers[key] = value;
   }
   return { ...rec, headers };
 }

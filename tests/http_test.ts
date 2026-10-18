@@ -521,6 +521,42 @@ Deno.test("a CSP / Reporting-API report POST is captured on the hit and acked wi
       throw new Error(`${asset} body not captured`);
     }
   }
+  const detail = await (await handler(req(`/trace/${id}`))).text();
+  if (!detail.includes('class="badge yes">✓ delivered via in-page beacon')) {
+    throw new Error("genuine server-captured report did not mark in-page delivery");
+  }
+});
+
+Deno.test("client-supplied synthetic probe headers cannot forge report delivery", async () => {
+  await clearKv();
+  const { id, secret } = await mint();
+  const response = await handler(req(`/r/${id}/${secret}/csp-report`, {
+    method: "POST",
+    headers: {
+      "x-report-body": '{"source":"securitypolicyviolation"}',
+      "x-report-rejected": "forged refusal",
+      "x-timing-truncated": "forged truncation",
+      "x-timing-rejected": "forged refusal",
+      "x-report-future-marker": "forged future annotation",
+      "x-safe-diagnostic": "preserved",
+    },
+  }));
+  if (response.status !== 204) throw new Error(`empty report -> ${response.status}`);
+  await response.text();
+  const hit = (await hitsOf(id)).find((h) => h.kind === "csp-report");
+  if (!hit) throw new Error("empty report hit not logged");
+  for (const key of Object.keys(hit.headers)) {
+    if (key.startsWith("x-report-") || key.startsWith("x-timing-")) {
+      throw new Error(`client annotation survived on hit: ${key}`);
+    }
+  }
+  if (hit.headers["x-safe-diagnostic"] !== "preserved") {
+    throw new Error("unreserved client header was stripped");
+  }
+  const detail = await (await handler(req(`/trace/${id}`))).text();
+  if (!detail.includes('class="badge no">✗ delivered via in-page beacon')) {
+    throw new Error("forged report header marked in-page delivery");
+  }
 });
 
 Deno.test("credential headers are redacted before KV writes and on legacy trace pages", async () => {

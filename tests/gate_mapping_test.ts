@@ -881,3 +881,95 @@ Deno.test("the check tasks derive their paths from the tree instead of enumerati
     );
   }
 });
+
+// The reserved x-report-*/x-timing-* evidence namespace belongs to the module that owns
+// HitRecord, not to whichever ingress happens to exist today (ua-tracer-egg).
+//
+// ua-tracer-0l9 closed the forgery - a client header arriving as "the beacon was
+// delivered" - by stripping those names in server.ts's header ingress. That is a
+// predicate at a CALL SITE: a new route, a backfill writer, a script or a fixture that
+// assembles a HitRecord's headers itself would bypass it silently and reintroduce the
+// forgery, with nothing but a comment to stop it. So the namespace is checked as a
+// property of the tree rather than as a list someone maintains:
+//
+//   1. the reservation is DECLARED in storage.ts, beside the record it protects, and no
+//      other non-test source file contains a reserved name at all - so a new annotation
+//      has to be added to EVIDENCE_KEYS, which is what puts it inside the strip;
+//   2. every name in EVIDENCE_KEYS is inside the declared prefixes (derived from the two
+//      declarations, not from a third list that could drift);
+//   3. the write boundary sanitises: logHit folds through withEvidence(), which applies
+//      clientHeaders() to whatever the caller assembled.
+//
+// Tests are excluded from (1) on purpose: reproducing the forgery is exactly what they
+// have to be able to spell, and kv_behaviour_test.ts drives the boundary with one.
+Deno.test("the reserved evidence namespace is declared in storage and enforced at the write boundary", async () => {
+  const storage = await Deno.readTextFile(new URL("../storage.ts", import.meta.url));
+
+  // The prefixes come from the declaration itself, so this guard has no third copy to
+  // fall out of step with them.
+  const prefixesAt = storage.indexOf("SYNTHETIC_HEADER_PREFIXES =");
+  const prefixesEnd = storage.indexOf("as const", prefixesAt);
+  if (prefixesAt < 0 || prefixesEnd < 0) {
+    throw new Error("storage.ts no longer declares SYNTHETIC_HEADER_PREFIXES");
+  }
+  const prefixes = [...storage.slice(prefixesAt, prefixesEnd).matchAll(/"([^"]+)"/g)]
+    .map((m) => m[1]);
+  if (prefixes.length < 2 || prefixes.some((p) => !/^x-[a-z-]+-$/.test(p))) {
+    throw new Error(`unexpected reserved prefixes: ${JSON.stringify(prefixes)}`);
+  }
+
+  // 1. Declared here and referenced nowhere else.
+  const offenders: string[] = [];
+  for (const file of await trackedFiles()) {
+    if (file === "storage.ts" || file.startsWith("tests/")) continue;
+    const src = await Deno.readTextFile(new URL(`../${file}`, import.meta.url));
+    for (const prefix of prefixes) {
+      if (src.includes(prefix)) offenders.push(`${file} (${prefix})`);
+    }
+  }
+  if (offenders.length) {
+    throw new Error(
+      `a reserved evidence name is written outside storage.ts: ${
+        offenders.join(", ")
+      } - add it to EVIDENCE_KEYS in storage.ts instead, so the strip covers it`,
+    );
+  }
+
+  // 2. Every declared evidence key is inside the reservation.
+  const keysAt = storage.indexOf("EVIDENCE_KEYS = {");
+  const keysEnd = storage.indexOf("} as const", keysAt);
+  if (keysAt < 0 || keysEnd < 0) throw new Error("storage.ts no longer declares EVIDENCE_KEYS");
+  const keys = [...storage.slice(keysAt, keysEnd).matchAll(/:\s*"([^"]+)"/g)].map((m) => m[1]);
+  if (keys.length === 0) throw new Error("EVIDENCE_KEYS parsed as empty - has its shape changed?");
+  const outside = keys.filter((key) => !prefixes.some((p) => key.startsWith(p)));
+  if (outside.length) {
+    throw new Error(`EVIDENCE_KEYS names outside the reserved prefixes: ${outside.join(", ")}`);
+  }
+
+  // 3. The boundary itself: logHit sanitises through withEvidence, which applies
+  //    clientHeaders. A future refactor that drops either link reopens the bypass.
+  const logHitAt = storage.indexOf("export async function logHit");
+  if (logHitAt < 0) throw new Error("logHit is gone");
+  if (!storage.slice(logHitAt).includes("withEvidence(rec, evidence)")) {
+    throw new Error("logHit no longer sanitises through withEvidence - a direct writer can forge");
+  }
+  const withEvidenceAt = storage.indexOf("function withEvidence");
+  const withEvidence = storage.slice(withEvidenceAt, logHitAt);
+  if (withEvidenceAt < 0 || !withEvidence.includes("clientHeaders(rec.headers)")) {
+    throw new Error("withEvidence no longer applies clientHeaders to the caller's headers");
+  }
+  if (!withEvidence.includes("isSyntheticHeaderName(name)")) {
+    throw new Error("the evidence channel no longer checks the reserved namespace");
+  }
+});
+
+async function trackedFiles(): Promise<string[]> {
+  const out = await new Deno.Command("git", {
+    args: ["ls-files", "*.ts"],
+    cwd: repoRoot,
+    stdout: "piped",
+  }).output();
+  const files = lines(new TextDecoder().decode(out.stdout));
+  if (files.length < 8) throw new Error(`git ls-files '*.ts' returned ${files.length} files`);
+  return files;
+}

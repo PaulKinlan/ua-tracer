@@ -31,6 +31,56 @@ export function redactHeaders(headers: Record<string, string>): Record<string, s
   );
 }
 
+// These prefixes are RESERVED for evidence this module stores after reading a probe
+// body. A client can put any header name it likes on a request, so a hit must never
+// take one of these from the wire: they are the difference between "the beacon
+// arrived and its body was captured" and "the client says it did" (ua-tracer-0l9).
+//
+// The predicate lives BESIDE THE RECORD IT PROTECTS rather than at the ingress that
+// happens to exist today. A new route, backfill writer, script or fixture that
+// assembles a HitRecord's headers itself must not be able to reintroduce the forgery
+// silently, so the reservation is enforced at the persistence boundary too
+// (withEvidence below), and `evidence` is the one explicit channel that may write a
+// reserved name (ua-tracer-egg).
+export const SYNTHETIC_HEADER_PREFIXES = ["x-report-", "x-timing-"] as const;
+
+export function isSyntheticHeaderName(name: string): boolean {
+  return SYNTHETIC_HEADER_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+// The names inside the reserved namespace, in one place, so the writer (the entrypoint's
+// probe path), the reader (the trace view) and the strip above cannot drift apart. A new
+// annotation is added HERE - which is what puts it inside the reservation - never as a
+// literal at a call site.
+export const EVIDENCE_KEYS = {
+  reportBody: "x-report-body",
+  reportRejected: "x-report-rejected",
+  timingTruncated: "x-timing-truncated",
+  timingRejected: "x-timing-rejected",
+} as const;
+
+/** Server-derived evidence about a probe body. Reserved names only; anything else is dropped. */
+export type HitEvidence = Partial<
+  Record<(typeof EVIDENCE_KEYS)[keyof typeof EVIDENCE_KEYS], string>
+>;
+
+/**
+ * The single sanitising ingress for request-derived headers: every header a request
+ * supplies passes through here before it can reach a record.
+ *
+ * It is applied AGAIN at the persistence boundary (see `withEvidence`), because the
+ * point of the reservation is that a future ingress cannot forget it.
+ */
+export function clientHeaders(headers: Headers | Record<string, string>): Record<string, string> {
+  const pairs = headers instanceof Headers ? headers.entries() : Object.entries(headers);
+  const obj: Record<string, string> = {};
+  for (const [name, value] of pairs) {
+    if (isSyntheticHeaderName(name)) continue;
+    obj[name] = value;
+  }
+  return redactHeaders(obj);
+}
+
 export interface TraceRecord {
   id: string;
   ts: number; // ms since epoch (server-receive)
@@ -256,7 +306,7 @@ function encodedSize(value: unknown): number {
 /** Drop the client-supplied display payload: it is what can push a record over the cap. */
 function stripPayload(rec: HitRecord): HitRecord {
   const headers = { ...rec.headers };
-  delete headers["x-report-body"];
+  delete headers[EVIDENCE_KEYS.reportBody];
   const { timing: _timing, ...rest } = rec;
   return { ...rest, headers };
 }
@@ -291,7 +341,7 @@ function boundRecord(rec: HitRecord, warn: (line: string) => void): HitRecord {
   // the one KV rejects against its own cap without this function ever being asked
   // (ua-tracer-emp's residual), so it has to be routed through the size check too.
   if (
-    !rec.timing?.length && !rec.headers["x-report-body"] && !hasHugeHeader(rec)
+    !rec.timing?.length && !rec.headers[EVIDENCE_KEYS.reportBody] && !hasHugeHeader(rec)
   ) return rec;
   if (encodedSize(rec) <= MAX_RECORD_BYTES) return rec;
 
@@ -511,8 +561,32 @@ export function hitKeyFor(id: string, tsNanos: bigint): Deno.KvKey {
   return ["hit", id, tsNanos.toString().padStart(25, "0"), shortId()];
 }
 
-export async function logHit(rec: HitRecord): Promise<void> {
+/**
+ * The write boundary for a hit's headers (ua-tracer-egg). Two rules, enforced HERE
+ * rather than at the caller:
+ *  - request-derived headers go through `clientHeaders`, so a reserved name supplied by
+ *    a client cannot reach storage even if a new ingress forgets to strip it;
+ *  - server-derived evidence may set a reserved name only through the explicit
+ *    `evidence` argument, which makes "where did this annotation come from" greppable.
+ *    A non-reserved name there is a caller bug: the probe is kept, the misnamed
+ *    annotation is dropped with a warning rather than throwing on the request path.
+ */
+function withEvidence(rec: HitRecord, evidence: HitEvidence): HitRecord {
+  const headers = clientHeaders(rec.headers);
+  for (const [name, value] of Object.entries(evidence)) {
+    if (value === undefined) continue;
+    if (!isSyntheticHeaderName(name)) {
+      console.warn(`[hit] dropped non-reserved evidence header "${name}" on trace ${rec.id}`);
+      continue;
+    }
+    headers[name] = value;
+  }
+  return { ...rec, headers };
+}
+
+export async function logHit(rec: HitRecord, evidence: HitEvidence = {}): Promise<void> {
   const kv = await getKv();
+  rec = withEvidence(rec, evidence);
   // Sequence per trace so we can list hits in receive order. Use a counter via
   // atomic-ish read+write; collisions are fine (we order by ts then seq).
   const tsNanos = BigInt(rec.ts) * 1000000n +

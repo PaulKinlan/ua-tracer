@@ -19,7 +19,11 @@ import {
   type AssetKind,
   casRetry,
   commitHit,
+  EVIDENCE_KEYS,
+  type HitEvidence,
   hitKeyFor,
+  isSyntheticHeaderName,
+  listHits,
   logHit,
   MAX_RECORD_BYTES,
 } from "../storage.ts";
@@ -633,5 +637,70 @@ Deno.test("a pre-existing hit record is never rewritten by a new one", async () 
   const after = (await kv.get<HitRecord>(legacyKey)).value;
   if (JSON.stringify(after) !== JSON.stringify(legacy)) {
     throw new Error(`the legacy record changed: ${JSON.stringify(after)}`);
+  }
+});
+
+// The reserved x-report-*/x-timing-* namespace is enforced where the record is WRITTEN,
+// not only where a request is read (ua-tracer-egg).
+//
+// ua-tracer-0l9 put the strip in the entrypoint's header ingress. That closes the two
+// ingresses that exist today and nothing else: a future route, a backfill writer, a
+// script or a fixture that assembles a HitRecord's headers itself would carry a
+// client-supplied "the beacon was delivered" annotation into KV, and no test would
+// notice. This test drives that future writer directly - it never touches the
+// entrypoint - so it fails if the boundary stops sanitising.
+Deno.test("a direct writer cannot forge evidence headers past the hit write boundary", async () => {
+  await clearKv();
+  const { id } = await mintOnce();
+  const ts = Date.now();
+
+  // 1. A record assembled the naive way: request headers copied straight across.
+  await logHit({
+    ...hitRec(id, "csp-report", ts),
+    headers: {
+      "x-report-body": '{"source":"securitypolicyviolation"}',
+      "x-report-rejected": "forged refusal",
+      "x-timing-truncated": "forged truncation",
+      "x-report-future-marker": "not a name this repo knows yet",
+      "content-type": "application/csp-report",
+    },
+  });
+
+  // 2. The same, plus the one channel that IS allowed to annotate - and one key
+  //    deliberately outside the reserved namespace, which must be dropped rather than
+  //    stored as if we had reserved it.
+  await logHit(
+    { ...hitRec(id, "report", ts + 1), headers: { "x-report-body": "forged again" } },
+    {
+      [EVIDENCE_KEYS.reportBody]: '{"source":"ReportingObserver"}',
+      "x-not-reserved": "caller bug",
+    } as HitEvidence,
+  );
+
+  const hits = await listHits(id);
+  const forged = hits.find((h) => h.kind === "csp-report");
+  if (!forged) throw new Error("the directly-written hit was not recorded");
+  for (const name of Object.keys(forged.headers)) {
+    if (isSyntheticHeaderName(name)) {
+      throw new Error(`a reserved header survived a direct write: ${name}`);
+    }
+  }
+  if (forged.headers["content-type"] !== "application/csp-report") {
+    throw new Error("an ordinary client header was stripped along with the reservation");
+  }
+
+  const annotated = hits.find((h) => h.kind === "report");
+  if (!annotated) throw new Error("the annotated hit was not recorded");
+  if (annotated.headers[EVIDENCE_KEYS.reportBody] !== '{"source":"ReportingObserver"}') {
+    throw new Error("server-derived evidence did not survive the write boundary");
+  }
+  if ("x-not-reserved" in annotated.headers) {
+    throw new Error("a non-reserved evidence key was stored as if it were reserved");
+  }
+
+  // And the render that reads the annotation sees only our value, not the forged one.
+  const detail = await (await handler(req(`/trace/${id}`))).text();
+  if (!detail.includes('class="badge yes">✓ delivered via in-page beacon')) {
+    throw new Error("server-derived report evidence did not mark in-page delivery");
   }
 });

@@ -1,6 +1,6 @@
 // Pure HTML rendering; storage and network access belong to the entrypoint.
 import type { BotVerification } from "./bot-verification.ts";
-import { redactHeaders } from "./storage.ts";
+import { EVIDENCE_KEYS, redactHeaders } from "./storage.ts";
 import type { AssetKind, HitRecord, ProbeRecord, TraceRecord, TraceStats } from "./storage.ts";
 import { assetBase } from "./probes.ts";
 
@@ -975,12 +975,12 @@ export function traceDetailHtml(trace: TraceRecord, hits: HitRecord[]): string {
   // rarely flushed by crawlers. Our in-page listeners (securitypolicyviolation
   // / ReportingObserver) beacon immediately and are tagged with a `source`.
   const reportHits = hits.filter((h) => h.kind === "csp-report" || h.kind === "report");
-  const reportBodies = reportHits.map((h) => h.headers["x-report-body"] ?? "");
+  const reportBodies = reportHits.map((h) => h.headers[EVIDENCE_KEYS.reportBody] ?? "");
   const reportViaJs = reportBodies.some((b) =>
     b.includes("securitypolicyviolation") || b.includes("ReportingObserver")
   );
   const reportViaHeader = reportHits.some((h) => {
-    const b = h.headers["x-report-body"] ?? "";
+    const b = h.headers[EVIDENCE_KEYS.reportBody] ?? "";
     const ct = (h.headers["content-type"] ?? "").toLowerCase();
     // A header-delivered report is NOT one of our JS beacons.
     return (ct.includes("csp-report") || ct.includes("reports+json")) &&

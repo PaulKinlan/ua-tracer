@@ -21,13 +21,15 @@ import {
 } from "./probes.ts";
 import { classifyBot } from "./bot-verification.ts";
 import {
+  clientHeaders,
+  EVIDENCE_KEYS,
   getKv,
+  type HitEvidence,
   listHits,
   logHit,
   logProbe,
   recentProbes,
   recentTraces,
-  redactHeaders,
   type ResourceTiming,
   searchTracesByUa,
   seedTrace,
@@ -91,19 +93,11 @@ export function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
   return "unknown";
 }
 
-// These prefixes are reserved for annotations written by handleAsset after
-// reading probe bodies. Never let client headers masquerade as evidence of
-// report delivery, body rejection, or timing truncation in a stored hit.
-const syntheticHeaderPrefixes = ["x-report-", "x-timing-"];
-
-function headersToObject(headers: Headers): Record<string, string> {
-  const obj: Record<string, string> = {};
-  for (const [k, v] of headers.entries()) {
-    if (syntheticHeaderPrefixes.some((prefix) => k.startsWith(prefix))) continue;
-    obj[k] = v;
-  }
-  return redactHeaders(obj);
-}
+// Request headers become a hit's headers ONLY through clientHeaders (storage.ts), which
+// strips the reserved evidence namespace (EVIDENCE_KEYS, storage.ts) and redacts
+// credentials. The strip is repeated at the persistence boundary, so a new ingress that
+// forgets this still cannot store a client-supplied annotation as evidence
+// (ua-tracer-0l9, ua-tracer-egg).
 
 // Common HTTP headers for responses from the route handlers.
 function noStore(headers: HeadersInit = {}): Headers {
@@ -299,7 +293,10 @@ async function handleAsset(
 ): Promise<Response> {
   const ua = req.headers.get("user-agent") ?? "";
   const ts = Date.now();
-  const headers = headersToObject(req.headers);
+  const headers = clientHeaders(req.headers);
+  // Evidence about the probe body travels in its own channel: the reserved namespace
+  // (EVIDENCE_KEYS) is the one thing a request may never fill in.
+  const evidence: HitEvidence = {};
 
   // Verify the per-trace secret. New traces store a secret on the TraceRecord
   // and require it in the URL (/r/{id}/{secret}/...); old traces (no secret
@@ -331,7 +328,7 @@ async function handleAsset(
   //    absorbed; the probe is still recorded below, marked as refused; and
   //  - the payload that does get read is bounded again before it is STORED, so a body
   //    this app accepted cannot become a record the KV cannot hold - entries are dropped
-  //    from the end and reported in x-timing-truncated.
+  //    from the end and reported under EVIDENCE_KEYS.timingTruncated.
   // Either way the probe is recorded: an over-limit post costs the payload, never the
   // fact that the probe happened.
   let timing: ResourceTiming[] | undefined;
@@ -341,7 +338,7 @@ async function handleAsset(
       const text = await readBoundedBody(req);
       if (text === null) {
         timingBodyRefused = true;
-        headers["x-timing-rejected"] =
+        evidence[EVIDENCE_KEYS.timingRejected] =
           `request body over ${MAX_PROBE_BODY_BYTES} bytes - not read, timing payload dropped`;
         console.warn(
           `[timing] trace=${id} refused a request body over ${MAX_PROBE_BODY_BYTES} bytes`,
@@ -354,7 +351,7 @@ async function handleAsset(
           if (bounded.dropped > 0 || bounded.namesTruncated > 0) {
             // Visible in the trace itself, not only in a log nobody reads: the
             // marker rides in the hit record's headers, which the trace view shows.
-            headers["x-timing-truncated"] = timingNote(bounded);
+            evidence[EVIDENCE_KEYS.timingTruncated] = timingNote(bounded);
             console.warn(`[timing] trace=${id} ${timingNote(bounded)}`);
           }
         }
@@ -373,12 +370,13 @@ async function handleAsset(
       const text = await readBoundedBody(req);
       if (text === null) {
         reportBodyRefused = true;
-        headers["x-report-rejected"] = `request body over ${MAX_PROBE_BODY_BYTES} bytes - not read`;
+        evidence[EVIDENCE_KEYS.reportRejected] =
+          `request body over ${MAX_PROBE_BODY_BYTES} bytes - not read`;
         console.warn(
           `[report] trace=${id} refused a request body over ${MAX_PROBE_BODY_BYTES} bytes`,
         );
       } else if (text) {
-        headers["x-report-body"] = text.slice(0, 4000);
+        evidence[EVIDENCE_KEYS.reportBody] = text.slice(0, 4000);
       }
     } catch (_e) { /* ignore */ }
   }
@@ -386,7 +384,9 @@ async function handleAsset(
   // Serve assets even for an unknown trace (bot probes rely on this), but do
   // not persist a hit with no owner. A trace disappearing after this lookup is
   // still handled by logHit's race-tolerant storage fallback.
-  if (trace.value) await logHit({ id, kind, ts, ua, ip, method: req.method, headers, timing });
+  if (trace.value) {
+    await logHit({ id, kind, ts, ua, ip, method: req.method, headers, timing }, evidence);
+  }
 
   switch (asset) {
     case "style.css":
@@ -486,7 +486,7 @@ async function handleAsset(
     case "csp-report":
     case "report":
       // CSP / Reporting-API endpoints. The posted report body was captured above
-      // (x-report-body header) for display in the trace. An over-limit body is
+      // (EVIDENCE_KEYS.reportBody) for display in the trace. An over-limit body is
       // refused with a 4xx instead of being absorbed - but the hit is already
       // logged above, so the trace still shows the probe happened.
       if (reportBodyRefused) return payloadTooLarge();
@@ -502,7 +502,7 @@ async function handleHomepage(
   trustedIp: string | null,
 ): Promise<Response> {
   const ua = req.headers.get("user-agent") ?? "";
-  const headers = headersToObject(req.headers);
+  const headers = clientHeaders(req.headers);
   // Derive the public origin for copy-pasteable examples. Honour the proxy's
   // forwarded host/proto (Deno Deploy sets these) and fall back to the URL.
   const reqUrl = new URL(req.url);

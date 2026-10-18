@@ -688,6 +688,11 @@ Deno.test("a direct writer cannot forge evidence headers past the hit write boun
     {
       [EVIDENCE_KEYS.reportBody]: '{"source":"ReportingObserver"}',
       "x-not-reserved": "caller bug",
+      // The evidence channel is the one place a reserved name is allowed, and it is
+      // allowed in any spelling because HTTP header names are case-insensitive. It must
+      // therefore land under the canonical literal every reader asks for, not under the
+      // caller's spelling (ua-tracer-t8v, ua-tracer-bns).
+      "X-Report-Rejected": "mixed case caller",
     } as HitEvidence,
   );
 
@@ -717,10 +722,67 @@ Deno.test("a direct writer cannot forge evidence headers past the hit write boun
   if ("x-not-reserved" in annotated.headers) {
     throw new Error("a non-reserved evidence key was stored as if it were reserved");
   }
+  if (annotated.headers[EVIDENCE_KEYS.reportRejected] !== "mixed case caller") {
+    throw new Error("a mixed-case evidence key was not stored under its canonical name");
+  }
+  if ("X-Report-Rejected" in annotated.headers) {
+    throw new Error("a mixed-case evidence key was stored under the caller's spelling");
+  }
 
   // And the render that reads the annotation sees only our value, not the forged one.
   const detail = await (await handler(req(`/trace/${id}`))).text();
   if (!detail.includes('class="badge yes">✓ delivered via in-page beacon')) {
     throw new Error("server-derived report evidence did not mark in-page delivery");
+  }
+});
+
+// Its own test so a regression here is attributable on its own: the badge is decided by
+// views.ts:978 reading headers[EVIDENCE_KEYS.reportBody], so it proves the annotation is
+// READABLE by the view, not merely canonical in KV (ua-tracer-t8v).
+Deno.test("a mixed-case evidence body reaches the view's in-page beacon badge", async () => {
+  await clearKv();
+  const { id } = await mintOnce();
+  await logHit(
+    { ...hitRec(id, "report", Date.now()), headers: {} },
+    { "X-Report-Body": '{"source":"ReportingObserver"}' } as HitEvidence,
+  );
+  const detail = await (await handler(req(`/trace/${id}`))).text();
+  if (!detail.includes('class="badge yes">✓ delivered via in-page beacon')) {
+    throw new Error("a mixed-case evidence body was stored but is invisible to the view");
+  }
+});
+
+Deno.test("a mixed-case evidence body is stripped from an over-budget record too", async () => {
+  await clearKv();
+  const { id } = await mintOnce();
+  // The strip deletes the canonical literal `EVIDENCE_KEYS.reportBody`. If the write
+  // boundary kept the caller's spelling, the body would survive the strip and ride out
+  // inside a record that is supposed to have lost its payload (ua-tracer-t8v, ua-tracer-bns).
+  const fat: HitRecord = {
+    ...hitRec(id, "report", Date.now()),
+    timing: Array.from({ length: 400 }, (_, i) => ({
+      name: `https://uatracer.com/r/t/${"p".repeat(120)}-${i}.css`,
+      entryType: "resource",
+      startTime: i,
+      duration: 1.5,
+      initiatorType: "link",
+      transferSize: 1024,
+      decodedBodySize: 2048,
+      encodedBodySize: 1024,
+      responseStatus: 200,
+      nextHopProtocol: "h2",
+      renderBlockingStatus: "blocking",
+    })),
+  };
+  if (JSON.stringify(fat).length <= 65536) throw new Error("fixture is not over the cap");
+  await logHit(fat, { "X-Report-Body": '{"source":"ReportingObserver"}' } as HitEvidence);
+
+  const stored = (await listHits(id)).find((h) => h.kind === "report");
+  if (!stored) throw new Error("the over-budget probe was lost instead of bounded");
+  if (!stored.headers["x-payload-truncated"]) {
+    throw new Error("the truncation is not marked in the record");
+  }
+  for (const name of [EVIDENCE_KEYS.reportBody, "X-Report-Body"]) {
+    if (name in stored.headers) throw new Error(`an over-budget evidence body survived as ${name}`);
   }
 });

@@ -91,9 +91,17 @@ export function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
   return "unknown";
 }
 
+// These prefixes are reserved for annotations written by handleAsset after
+// reading probe bodies. Never let client headers masquerade as evidence of
+// report delivery, body rejection, or timing truncation in a stored hit.
+const syntheticHeaderPrefixes = ["x-report-", "x-timing-"];
+
 function headersToObject(headers: Headers): Record<string, string> {
   const obj: Record<string, string> = {};
-  for (const [k, v] of headers.entries()) obj[k] = v;
+  for (const [k, v] of headers.entries()) {
+    if (syntheticHeaderPrefixes.some((prefix) => k.startsWith(prefix))) continue;
+    obj[k] = v;
+  }
   return redactHeaders(obj);
 }
 

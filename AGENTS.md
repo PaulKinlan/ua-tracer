@@ -168,11 +168,11 @@ Two things a lane must not break:
   `backfill-verified.ts`) or whose provenance cannot be established at all, and re-tags it
   `unverifiable` instead — a forged address already in KV must not be republished, and the run
   reports how many verdicts it withheld (ua-tracer-4c9).
-- **Reserved evidence namespace (`x-report-*`, `x-timing-*`):** those names on a hit are
-  server evidence about the probe body, never something a client sent. The reservation is declared
-  and enforced in `storage.ts` beside the record it protects, not at an ingress (ua-tracer-egg):
-  request headers reach a record only through `clientHeaders()`, and `logHit` re-applies it and
-  accepts an annotation only through its explicit `evidence` argument. A new annotation goes into
+- **Reserved evidence namespace (`x-report-*`, `x-timing-*`):** those names on a hit are server
+  evidence about the probe body, never something a client sent. The reservation is declared and
+  enforced in `storage.ts` beside the record it protects, not at an ingress (ua-tracer-egg): request
+  headers reach a record only through `clientHeaders()`, and `logHit` re-applies it and accepts an
+  annotation only through its explicit `evidence` argument. A new annotation goes into
   `EVIDENCE_KEYS` there, never as a literal at a call site — `tests/gate_mapping_test.ts` fails if a
   reserved name is written in any other non-test module, and `tests/kv_behaviour_test.ts` drives a
   direct writer to prove the write boundary strips a forged one.

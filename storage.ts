@@ -45,7 +45,8 @@ export function redactHeaders(headers: Record<string, string>): Record<string, s
 export const SYNTHETIC_HEADER_PREFIXES = ["x-report-", "x-timing-"] as const;
 
 export function isSyntheticHeaderName(name: string): boolean {
-  return SYNTHETIC_HEADER_PREFIXES.some((prefix) => name.startsWith(prefix));
+  const normalized = name.toLowerCase();
+  return SYNTHETIC_HEADER_PREFIXES.some((prefix) => normalized.startsWith(prefix));
 }
 
 // The names inside the reserved namespace, in one place, so the writer (the entrypoint's

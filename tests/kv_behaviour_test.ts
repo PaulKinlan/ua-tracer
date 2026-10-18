@@ -640,6 +640,17 @@ Deno.test("a pre-existing hit record is never rewritten by a new one", async () 
   }
 });
 
+Deno.test("reserved evidence header names match regardless of case", () => {
+  for (const name of ["x-report-body", "x-timing-truncated", "X-Report-Body", "x-report-BODY"]) {
+    if (!isSyntheticHeaderName(name)) {
+      throw new Error(`reserved header was not recognized: ${name}`);
+    }
+  }
+  if (isSyntheticHeaderName("X-Custom-Header")) {
+    throw new Error("an ordinary header was treated as reserved");
+  }
+});
+
 // The reserved x-report-*/x-timing-* namespace is enforced where the record is WRITTEN,
 // not only where a request is read (ua-tracer-egg).
 //
@@ -662,6 +673,9 @@ Deno.test("a direct writer cannot forge evidence headers past the hit write boun
       "x-report-rejected": "forged refusal",
       "x-timing-truncated": "forged truncation",
       "x-report-future-marker": "not a name this repo knows yet",
+      "X-Report-Body": "forged with mixed case",
+      "x-report-BODY": "forged with a mixed suffix",
+      "X-Custom-Header": "ordinary header",
       "content-type": "application/csp-report",
     },
   });
@@ -685,7 +699,13 @@ Deno.test("a direct writer cannot forge evidence headers past the hit write boun
       throw new Error(`a reserved header survived a direct write: ${name}`);
     }
   }
-  if (forged.headers["content-type"] !== "application/csp-report") {
+  for (const name of ["X-Report-Body", "x-report-BODY"]) {
+    if (name in forged.headers) throw new Error(`a mixed-case reserved header survived: ${name}`);
+  }
+  if (
+    forged.headers["content-type"] !== "application/csp-report" ||
+    forged.headers["X-Custom-Header"] !== "ordinary header"
+  ) {
     throw new Error("an ordinary client header was stripped along with the reservation");
   }
 

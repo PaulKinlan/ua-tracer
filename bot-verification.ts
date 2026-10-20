@@ -67,9 +67,20 @@ export function ipv4ToInt(ip: string): number | null {
   }
   return n >>> 0;
 }
+/**
+ * IPv4 CIDR containment. Accepted prefix forms:
+ *  - slashed CIDR, e.g. "66.249.66.0/24" with /0–/32 — the only form the published
+ *    bot feeds emit;
+ *  - a bare decimal integer string, e.g. "16909060", meaning a single host.
+ * A bare dotted-quad without a slash ("1.2.3.4") is deliberately NOT a host match:
+ * it is ambiguous input and fails closed — a dotted-quad can never equal the decimal
+ * integer string of an IP, so only the bare integer form passes the no-slash branch.
+ */
 export function cidrContains4(cidr: string, ipInt: number): boolean {
   const slash = cidr.indexOf("/");
-  if (slash < 0) return cidr === String(ipInt); // single host, rare
+  // No slash: bare decimal-integer host form only. A bare dotted-quad deliberately
+  // fails closed here (it never string-equals String(ipInt)); see the doc comment.
+  if (slash < 0) return cidr === String(ipInt);
   const base = ipv4ToInt(cidr.slice(0, slash));
   const bits = parseInt(cidr.slice(slash + 1), 10);
   if (base === null || Number.isNaN(bits) || bits < 0 || bits > 32) return false;

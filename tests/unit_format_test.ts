@@ -141,7 +141,9 @@ Deno.test("cidrContains4 fails closed on malformed prefixes", () => {
   for (const bad of ["1.2.3.0/33", "1.2.3.0/-1", "1.2.3.0/x", "999.2.3.0/24", ""]) {
     if (cidrContains4(bad, ip)) throw new Error(`expected false for ${JSON.stringify(bad)}`);
   }
-  // No slash: the implementation compares the literal to the integer.
+  // No slash: only the bare decimal-integer host form matches; a bare dotted-quad
+  // is deliberately ambiguous input and fails closed (it can never string-equal
+  // the decimal integer form of the IP).
   if (!cidrContains4("16909060", 16909060)) throw new Error("literal-integer host form");
   if (cidrContains4("1.2.3.4", ip)) throw new Error("dotted quad without a slash must not match");
 });

@@ -742,8 +742,8 @@ export async function logProbe(path: string, req: Request, ip: string): Promise<
   console.log(
     `[probe] ${method} ${boundedPath.slice(0, 80)} ip=${ip.slice(0, 80)} ua="${ua.slice(0, 80)}"`,
   );
-  const kv = await getKv();
   try {
+    const kv = await getKv();
     await kv.set(
       probeIndexKey(ts, shortId()),
       { path: boundedPath, ts, ua, ip, method } satisfies ProbeRecord,

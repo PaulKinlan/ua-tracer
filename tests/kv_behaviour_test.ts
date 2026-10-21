@@ -54,6 +54,27 @@ Deno.test("unsolicited probe storage bounds oversized path and UA at ingest", as
   }
 });
 
+Deno.test("an unavailable probe KV open is dropped without throwing", async () => {
+  // Import a fresh storage instance so getKv has not memoised the shared
+  // in-memory test KV. No network permission is granted to this suite.
+  const { logProbe } = await import("../storage.ts?unavailable-probe-kv");
+  const previousUrl = Deno.env.get("DENO_KV_URL");
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  try {
+    Deno.env.set("DENO_KV_URL", "https://kv.invalid.example/");
+    console.warn = (message: string) => warnings.push(message);
+    await logProbe("/robots.txt", req("/robots.txt"), IP);
+  } finally {
+    console.warn = originalWarn;
+    if (previousUrl === undefined) Deno.env.delete("DENO_KV_URL");
+    else Deno.env.set("DENO_KV_URL", previousUrl);
+  }
+  if (warnings.length !== 1 || warnings[0].length > 100) {
+    throw new Error(`expected one bounded drop warning, got ${JSON.stringify(warnings)}`);
+  }
+});
+
 Deno.test("an over-limit probe KV write is dropped without throwing", async () => {
   await clearKv();
   // An oversized peer address forces Deno KV's real 64 KiB value limit,

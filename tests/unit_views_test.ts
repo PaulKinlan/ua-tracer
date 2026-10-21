@@ -7,7 +7,42 @@ import {
   tracesPageHtml,
 } from "../views.ts";
 import { PROBE_KINDS } from "../probes.ts";
-import type { AssetKind, HitRecord, TraceRecord, TraceStats } from "../storage.ts";
+import {
+  type AssetKind,
+  type HitRecord,
+  MAX_PROBE_PATH_CHARS,
+  MAX_PROBE_UA_CHARS,
+  type TraceRecord,
+  type TraceStats,
+} from "../storage.ts";
+
+Deno.test("legacy oversized probe records have bounded /traces row and path-summary output", () => {
+  const path = `/.well-known/${"p".repeat(80_000)}`;
+  const ua = "u".repeat(80_000);
+  const html = tracesPageHtml({
+    traces: [],
+    allTraces: [],
+    uaEntries: [],
+    uaFilter: "",
+    pathFilter: "",
+    jsOnly: false,
+    totalTraces: 0,
+    uaPage: 0,
+    reqPage: 0,
+    probes: [{ path, ua, ts: 1_000, ip: "192.0.2.1", method: "GET" }],
+    pathEntries: [[path, { count: 1, uas: 1 }]],
+  });
+  if (html.includes("p".repeat(MAX_PROBE_PATH_CHARS + 1))) {
+    throw new Error("old probe path rendered without a bound");
+  }
+  if (html.includes("u".repeat(MAX_PROBE_UA_CHARS + 1))) {
+    throw new Error("old probe UA rendered without a bound");
+  }
+  if (html.length > 40_000) throw new Error(`one probe expanded /traces to ${html.length} chars`);
+  if (!html.includes(path.slice(0, MAX_PROBE_PATH_CHARS))) {
+    throw new Error("truncated path was not displayed");
+  }
+});
 
 Deno.test("homepage HTML keeps the per-trace secret in nested probe URLs", () => {
   const html = homepageHtml({

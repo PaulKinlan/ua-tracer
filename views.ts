@@ -1,6 +1,11 @@
 // Pure HTML rendering; storage and network access belong to the entrypoint.
 import type { BotVerification } from "./bot-verification.ts";
-import { EVIDENCE_KEYS, redactHeaders } from "./storage.ts";
+import {
+  EVIDENCE_KEYS,
+  MAX_PROBE_PATH_CHARS,
+  MAX_PROBE_UA_CHARS,
+  redactHeaders,
+} from "./storage.ts";
 import type { AssetKind, HitRecord, ProbeRecord, TraceRecord, TraceStats } from "./storage.ts";
 import { assetBase } from "./probes.ts";
 
@@ -770,8 +775,8 @@ export function tracesPageHtml(opts: TracesOpts): string {
   // Preserve the ua filter when linking by path, and vice versa.
   const probeFilterUrl = (ua: string, path: string) => {
     const params = new URLSearchParams();
-    if (ua) params.set("ua", ua);
-    if (path) params.set("path", path);
+    if (ua) params.set("ua", ua.slice(0, MAX_PROBE_UA_CHARS));
+    if (path) params.set("path", path.slice(0, MAX_PROBE_PATH_CHARS));
     const qs = params.toString();
     return (qs ? `/traces?${qs}` : "/traces") + "#unsolicited";
   };
@@ -833,7 +838,10 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, jsOnl
 </form>`;
 
   const probeRows = probes.slice(0, 200).map((pr) => {
-    const ua = pr.ua || "(no user-agent)";
+    // Old KV rows predate the write bound; cap both display and link text here.
+    const path = pr.path.slice(0, MAX_PROBE_PATH_CHARS);
+    const shownUa = (pr.ua || "").slice(0, MAX_PROBE_UA_CHARS);
+    const ua = shownUa || "(no user-agent)";
     const rel = correlateProbe(pr, allTraces);
     const relCell = rel
       ? `<a href="/trace/${escapeHtml(rel.trace.id)}" title="Same UA+IP loaded / ${
@@ -846,13 +854,13 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, jsOnl
       : `<span class="muted">—</span>`;
     return `<tr>
   <td class="mono">${fmtTs(pr.ts)}</td>
-  <td class="mono"><a href="${probeFilterUrl(uaFilter, pr.path)}" title="Filter to this path">${
-      escapeHtml(pr.path)
+  <td class="mono"><a href="${probeFilterUrl(uaFilter, path)}" title="Filter to this path">${
+      escapeHtml(path)
     }</a></td>
   <td><a class="ua" href="${
       probeFilterUrl(ua, pathFilter)
     }" title="Reverse lookup: all requests from ${escapeHtml(ua)}">${
-      escapeHtml(pr.ua || "—")
+      escapeHtml(shownUa || "—")
     }</a></td>
   <td class="mono">${relCell}</td>
 </tr>`;
@@ -867,15 +875,16 @@ ${pager(uaPage, uaEntries.length, UA_PAGE_SIZE, (p) => tracesUrl(uaFilter, jsOnl
     }.</p>`;
 
   // By path: which well-known/unsolicited paths got hit, and by how many UAs.
-  const pathRows = pathEntries.slice(0, 60).map(([p, g]) =>
-    `<tr>
-  <td class="mono"><a href="${probeFilterUrl(uaFilter, p)}" title="Show requests to ${
-      escapeHtml(p)
-    }">${escapeHtml(p)}</a></td>
+  const pathRows = pathEntries.slice(0, 60).map(([p, g]) => {
+    const path = p.slice(0, MAX_PROBE_PATH_CHARS);
+    return `<tr>
+  <td class="mono"><a href="${probeFilterUrl(uaFilter, path)}" title="Show requests to ${
+      escapeHtml(path)
+    }">${escapeHtml(path)}</a></td>
   <td class="mono">${g.count}</td>
   <td class="mono">${g.uas}</td>
-</tr>`
-  ).join("\n");
+</tr>`;
+  }).join("\n");
   const pathSummary = pathEntries.length
     ? `<div class="scrollx"><table>
 <thead><tr><th scope="col">Path</th><th scope="col">Requests</th><th scope="col">Distinct UAs</th></tr></thead>

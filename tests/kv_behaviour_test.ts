@@ -25,12 +25,57 @@ import {
   isSyntheticHeaderName,
   listHits,
   logHit,
+  MAX_PROBE_PATH_CHARS,
+  MAX_PROBE_UA_CHARS,
   MAX_RECORD_BYTES,
 } from "../storage.ts";
 import { runBackfill } from "../backfill.ts";
 
 const UA = "ConcurrentBot/9.9";
 const IP = "198.51.100.4";
+
+Deno.test("unsolicited probe storage bounds oversized path and UA at ingest", async () => {
+  await clearKv();
+  const kv = await testKv();
+  const path = `/.well-known/${"p".repeat(MAX_PROBE_PATH_CHARS * 2)}`;
+  const ua = "u".repeat(MAX_PROBE_UA_CHARS * 2);
+  const response = await handler(req(path, { headers: { "user-agent": ua } }), connInfo(IP));
+  if (response.status !== 200) throw new Error(`unexpected probe response ${response.status}`);
+  const records = [];
+  for await (const entry of kv.list<{ path: string; ua: string }>({ prefix: ["probe"] })) {
+    records.push(entry.value);
+  }
+  if (records.length !== 1) throw new Error(`expected one probe, got ${records.length}`);
+  if (records[0].path !== path.slice(0, MAX_PROBE_PATH_CHARS)) {
+    throw new Error("stored probe path was not bounded");
+  }
+  if (records[0].ua !== ua.slice(0, MAX_PROBE_UA_CHARS)) {
+    throw new Error("stored probe UA was not bounded");
+  }
+});
+
+Deno.test("an over-limit probe KV write is dropped without throwing", async () => {
+  await clearKv();
+  // An oversized peer address forces Deno KV's real 64 KiB value limit,
+  // without a mock KV. The handler must still serve the public probe.
+  const originalWarn = console.warn;
+  const originalLog = console.log;
+  const warnings: string[] = [];
+  console.warn = (message: string) => warnings.push(message);
+  console.log = () => {}; // The existing request log would repeat the test's huge peer address.
+  let response: Response;
+  try {
+    response = await handler(req("/robots.txt"), connInfo("i".repeat(70_000)));
+  } finally {
+    console.warn = originalWarn;
+    console.log = originalLog;
+  }
+  if (response.status !== 200) throw new Error(`oversized probe returned ${response.status}`);
+  if (await countPrefix(["probe"]) !== 0) throw new Error("oversized probe was stored");
+  if (warnings.length !== 1 || warnings[0].length > 100 || warnings[0].includes("iiii")) {
+    throw new Error(`expected one bounded warning, got ${JSON.stringify(warnings)}`);
+  }
+});
 
 async function mintOnce(ua = UA) {
   // The peer is the IP the app records; the header is a claim it must ignore.

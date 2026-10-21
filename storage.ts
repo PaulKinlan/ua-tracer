@@ -719,6 +719,10 @@ export async function uaAggregate(
 // Unsolicited "probe" requests: paths a UA fetches WITHOUT us ever linking them
 // (robots.txt, sitemap.xml, /.well-known/*, llms.txt, …). Logged separately from
 // traces (no trace id) — reveals what an agent checks on its own initiative.
+export const MAX_PROBE_PATH_CHARS = 2048;
+export const MAX_PROBE_UA_CHARS = 200;
+const MAX_PROBE_METHOD_CHARS = 16;
+
 export interface ProbeRecord {
   path: string;
   ts: number;
@@ -731,15 +735,25 @@ function probeIndexKey(ts: number, rid: string): [string, string, string] {
   return ["probe", reverseKey, rid];
 }
 export async function logProbe(path: string, req: Request, ip: string): Promise<void> {
-  const ua = req.headers.get("user-agent") ?? "";
+  const boundedPath = path.slice(0, MAX_PROBE_PATH_CHARS);
+  const ua = (req.headers.get("user-agent") ?? "").slice(0, MAX_PROBE_UA_CHARS);
+  const method = req.method.toUpperCase().slice(0, MAX_PROBE_METHOD_CHARS);
   const ts = Date.now();
-  console.log(`[probe] ${req.method} ${path} ip=${ip} ua="${ua.slice(0, 80)}"`);
-  const kv = await getKv();
-  await kv.set(
-    probeIndexKey(ts, shortId()),
-    { path, ts, ua, ip, method: req.method } as ProbeRecord,
-    { expireIn: 7 * 24 * 60 * 60 * 1000 },
+  console.log(
+    `[probe] ${method} ${boundedPath.slice(0, 80)} ip=${ip.slice(0, 80)} ua="${ua.slice(0, 80)}"`,
   );
+  const kv = await getKv();
+  try {
+    await kv.set(
+      probeIndexKey(ts, shortId()),
+      { path: boundedPath, ts, ua, ip, method } satisfies ProbeRecord,
+      { expireIn: 7 * 24 * 60 * 60 * 1000 },
+    );
+  } catch {
+    // Logging a probe is best-effort: an oversized or unavailable KV write must
+    // not change the response status. Never put untrusted values in the warning.
+    console.warn("[probe] KV write failed; dropped unsolicited probe");
+  }
 }
 export async function recentProbes(limit = 200): Promise<ProbeRecord[]> {
   const kv = await getKv();

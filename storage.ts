@@ -31,8 +31,10 @@ export function redactHeaders(headers: Record<string, string>): Record<string, s
   );
 }
 
-// These prefixes are RESERVED for evidence this module stores after reading a probe
-// body. A client can put any header name it likes on a request, so a hit must never
+// These prefixes are RESERVED for evidence this module stores itself: after reading a
+// probe body (x-report-, x-timing-) or when bounding an over-budget record
+// (x-payload-, written by boundRecord — ua-tracer-4dh). A client can put any header
+// name it likes on a request, so a hit must never
 // take one of these from the wire: they are the difference between "the beacon
 // arrived and its body was captured" and "the client says it did" (ua-tracer-0l9).
 //
@@ -42,7 +44,7 @@ export function redactHeaders(headers: Record<string, string>): Record<string, s
 // silently, so the reservation is enforced at the persistence boundary too
 // (withEvidence below), and `evidence` is the one explicit channel that may write a
 // reserved name (ua-tracer-egg).
-export const SYNTHETIC_HEADER_PREFIXES = ["x-report-", "x-timing-"] as const;
+export const SYNTHETIC_HEADER_PREFIXES = ["x-report-", "x-timing-", "x-payload-"] as const;
 
 export function isSyntheticHeaderName(name: string): boolean {
   const normalized = name.toLowerCase();
@@ -58,6 +60,7 @@ export const EVIDENCE_KEYS = {
   reportRejected: "x-report-rejected",
   timingTruncated: "x-timing-truncated",
   timingRejected: "x-timing-rejected",
+  payloadTruncated: "x-payload-truncated",
 } as const;
 
 /** Server-derived evidence about a probe body. Reserved names only; anything else is dropped. */
@@ -399,7 +402,7 @@ function boundRecord(rec: HitRecord, warn: (line: string) => void): HitRecord {
   const stripped = stripPayload(rec);
   let bounded: HitRecord = {
     ...stripped,
-    headers: { ...stripped.headers, "x-payload-truncated": marker },
+    headers: { ...stripped.headers, [EVIDENCE_KEYS.payloadTruncated]: marker },
   };
   if (encodedSize(bounded) > MAX_RECORD_BYTES) {
     // Even the metadata is over budget (a client can send very long header values).
@@ -411,7 +414,7 @@ function boundRecord(rec: HitRecord, warn: (line: string) => void): HitRecord {
       ua: rec.ua.slice(0, 200),
       ip: rec.ip,
       method: rec.method,
-      headers: { "x-payload-truncated": marker },
+      headers: { [EVIDENCE_KEYS.payloadTruncated]: marker },
     };
   }
   warn(

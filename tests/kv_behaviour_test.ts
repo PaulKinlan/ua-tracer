@@ -376,7 +376,7 @@ Deno.test("an over-limit payload is dropped so the probe is counted, not lost", 
   if (encoded(stored) > MAX_RECORD_BYTES) {
     throw new Error(`stored record is still ${encoded(stored)} bytes`);
   }
-  if (!stored.headers["x-payload-truncated"]) {
+  if (!stored.headers[EVIDENCE_KEYS.payloadTruncated]) {
     throw new Error("the truncation is not marked in the record");
   }
   if (!warnings.join(" ").includes("exceeded the KV value limit")) {
@@ -592,7 +592,7 @@ Deno.test("a header over the value cap is trimmed before the write, not rejected
   if (JSON.stringify(stored).length > MAX_RECORD_BYTES) {
     throw new Error(`stored ${JSON.stringify(stored).length} bytes, over the budget`);
   }
-  if (!stored.headers["x-payload-truncated"]) {
+  if (!stored.headers[EVIDENCE_KEYS.payloadTruncated]) {
     throw new Error(`the trim is not marked: ${JSON.stringify(stored.headers)}`);
   }
 });
@@ -848,7 +848,7 @@ Deno.test("a mixed-case evidence body is stripped from an over-budget record too
 
   const stored = (await listHits(id)).find((h) => h.kind === "report");
   if (!stored) throw new Error("the over-budget probe was lost instead of bounded");
-  if (!stored.headers["x-payload-truncated"]) {
+  if (!stored.headers[EVIDENCE_KEYS.payloadTruncated]) {
     throw new Error("the truncation is not marked in the record");
   }
   for (const name of [EVIDENCE_KEYS.reportBody, "X-Report-Body"]) {
@@ -956,5 +956,91 @@ Deno.test("an oversized trace cookie mints a fresh trace instead of throwing", a
   if (response.status !== 200) throw new Error(`oversized cookie returned ${response.status}`);
   if (await countPrefix(["trace"]) !== 1) {
     throw new Error("expected exactly one freshly minted trace");
+  }
+});
+
+// ---- ua-tracer-4dh: the truncation marker lives inside the reserved namespace ----
+// "x-payload-truncated" used to be a bare literal at boundRecord's call sites, outside
+// SYNTHETIC_HEADER_PREFIXES, so a client could send the header itself and have it stored
+// and rendered verbatim — forged evidence that the server dropped a payload when it did
+// not. It is now EVIDENCE_KEYS.payloadTruncated under the reserved "x-payload-" prefix,
+// stripped at both the request ingress (clientHeaders) and the write boundary
+// (withEvidence).
+
+Deno.test("x-payload-truncated is reserved and stripped like the other evidence names", () => {
+  for (const name of ["x-payload-truncated", "X-Payload-Truncated", "x-PAYLOAD-truncated"]) {
+    if (!isSyntheticHeaderName(name)) {
+      throw new Error(`truncation marker was not recognized as reserved: ${name}`);
+    }
+  }
+  if (EVIDENCE_KEYS.payloadTruncated !== "x-payload-truncated") {
+    throw new Error("the marker is not in EVIDENCE_KEYS");
+  }
+});
+
+Deno.test("a client cannot forge the truncation marker through a probe request", async () => {
+  await clearKv();
+  const { id, secret } = await mintOnce();
+  const forged = "payload dropped: 999999 bytes over the 61440-byte budget";
+  const response = await handler(
+    req(`/r/${id}/${secret}/main.js`, {
+      headers: { "user-agent": UA, "x-payload-truncated": forged },
+    }),
+    connInfo(IP),
+  );
+  if (response.status !== 200) throw new Error(`probe returned ${response.status}`);
+  const stored = (await listHits(id)).find((h) => h.kind === "js");
+  if (!stored) throw new Error("the js probe was not recorded");
+  if (EVIDENCE_KEYS.payloadTruncated in stored.headers) {
+    throw new Error("the forged truncation marker was stored as evidence");
+  }
+  // The render must not show a truncation the server never made.
+  const detail = await (await handler(req(`/trace/${id}`))).text();
+  if (detail.includes(forged)) {
+    throw new Error("the forged marker was rendered in the trace view");
+  }
+});
+
+Deno.test("a direct writer cannot forge the truncation marker past the write boundary", async () => {
+  await clearKv();
+  const { id } = await mintOnce();
+  await logHit({
+    ...hitRec(id, "css", Date.now()),
+    headers: { "x-payload-truncated": "forged by a writer that skipped clientHeaders" },
+  });
+  const stored = (await listHits(id)).find((h) => h.kind === "css");
+  if (!stored) throw new Error("the hit was not recorded");
+  if (EVIDENCE_KEYS.payloadTruncated in stored.headers) {
+    throw new Error("a reserved marker survived a direct write");
+  }
+});
+
+Deno.test("a genuine server-side truncation still writes the marker", async () => {
+  await clearKv();
+  const { id } = await mintOnce();
+  // An over-budget timing payload: boundRecord must still annotate the record it
+  // strips, now through EVIDENCE_KEYS rather than a literal.
+  const fat: HitRecord = {
+    ...hitRec(id, "report", Date.now()),
+    timing: Array.from({ length: 400 }, (_, i) => ({
+      name: `https://uatracer.com/r/t/${"p".repeat(120)}-${i}.css`,
+      entryType: "resource",
+      startTime: i,
+      duration: 1.5,
+      initiatorType: "link",
+      transferSize: 1024,
+      decodedBodySize: 2048,
+      encodedBodySize: 1024,
+      responseStatus: 200,
+      nextHopProtocol: "h2",
+      renderBlockingStatus: "blocking",
+    })),
+  };
+  await logHit(fat);
+  const stored = (await listHits(id)).find((h) => h.kind === "report");
+  if (!stored) throw new Error("the bounded probe was lost");
+  const marker = stored.headers[EVIDENCE_KEYS.payloadTruncated];
+  if (!marker || !marker.startsWith("payload dropped:")) {
+    throw new Error(`the genuine truncation is not marked: ${JSON.stringify(stored.headers)}`);
   }
 });

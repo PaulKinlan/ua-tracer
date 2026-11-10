@@ -25,9 +25,12 @@ import {
   isSyntheticHeaderName,
   listHits,
   logHit,
+  MAX_HEADER_VALUE_CHARS,
   MAX_PROBE_PATH_CHARS,
   MAX_PROBE_UA_CHARS,
   MAX_RECORD_BYTES,
+  MAX_TRACE_IP_CHARS,
+  MAX_TRACE_UA_CHARS,
 } from "../storage.ts";
 import { runBackfill } from "../backfill.ts";
 
@@ -373,7 +376,7 @@ Deno.test("an over-limit payload is dropped so the probe is counted, not lost", 
   if (encoded(stored) > MAX_RECORD_BYTES) {
     throw new Error(`stored record is still ${encoded(stored)} bytes`);
   }
-  if (!stored.headers["x-payload-truncated"]) {
+  if (!stored.headers[EVIDENCE_KEYS.payloadTruncated]) {
     throw new Error("the truncation is not marked in the record");
   }
   if (!warnings.join(" ").includes("exceeded the KV value limit")) {
@@ -589,7 +592,7 @@ Deno.test("a header over the value cap is trimmed before the write, not rejected
   if (JSON.stringify(stored).length > MAX_RECORD_BYTES) {
     throw new Error(`stored ${JSON.stringify(stored).length} bytes, over the budget`);
   }
-  if (!stored.headers["x-payload-truncated"]) {
+  if (!stored.headers[EVIDENCE_KEYS.payloadTruncated]) {
     throw new Error(`the trim is not marked: ${JSON.stringify(stored.headers)}`);
   }
 });
@@ -845,10 +848,199 @@ Deno.test("a mixed-case evidence body is stripped from an over-budget record too
 
   const stored = (await listHits(id)).find((h) => h.kind === "report");
   if (!stored) throw new Error("the over-budget probe was lost instead of bounded");
-  if (!stored.headers["x-payload-truncated"]) {
+  if (!stored.headers[EVIDENCE_KEYS.payloadTruncated]) {
     throw new Error("the truncation is not marked in the record");
   }
   for (const name of [EVIDENCE_KEYS.reportBody, "X-Report-Body"]) {
     if (name in stored.headers) throw new Error(`an over-budget evidence body survived as ${name}`);
+  }
+});
+
+// ---- ua-tracer-dpb: the trace seed is bounded against the KV value and key caps ----
+// seedTrace used to commit the request-shaped record unchecked, so a GET / with large
+// headers threw "Key or value too large" out of handleHomepage as an unhandled 500 and
+// no trace was minted at all. These tests pin the bounded-seed contract: cap the
+// client-shaped fields, truncate header values, fall back to metadata-only, and never
+// let the homepage fail because of what the client sent.
+
+Deno.test("an oversized homepage header and UA mint a bounded trace, not a 500", async () => {
+  await clearKv();
+  const kv = await testKv();
+  const hugeUa = "u".repeat(70_000);
+  const response = await handler(
+    req("/", { headers: { "user-agent": hugeUa, "x-huge": "h".repeat(70_000) } }),
+    connInfo(IP),
+  );
+  if (response.status !== 200) {
+    throw new Error(`oversized homepage returned ${response.status}`);
+  }
+  const { id } = traceBaseFromHtml(await response.text());
+  const rec = (await kv.get<TraceRecord>(["trace", id])).value;
+  if (!rec) throw new Error("the trace was not stored");
+  if (JSON.stringify(rec).length > MAX_RECORD_BYTES) {
+    throw new Error(`seed stored ${JSON.stringify(rec).length} bytes, over the budget`);
+  }
+  if (rec.ua !== hugeUa.slice(0, MAX_TRACE_UA_CHARS)) {
+    throw new Error(`seed UA was not bounded: ${rec.ua.length} chars`);
+  }
+  const huge = rec.headers["x-huge"];
+  if (!huge || huge.length > MAX_HEADER_VALUE_CHARS + 20 || !huge.endsWith("[truncated]")) {
+    throw new Error("the huge header value was not truncated and marked");
+  }
+  // The snapshot feeds the index KEY (normUa), so it must carry the same bounded UA.
+  const snap = (await kv.get<TraceStats>(recentIndexKey(rec.ts, id))).value;
+  if (!snap || snap.ua !== rec.ua || snap.ip !== rec.ip) {
+    throw new Error("the recent-index snapshot does not carry the bounded identity");
+  }
+  const uaSnap = (await kv.get<TraceStats>(uaIndexKey(rec.ua, rec.ts, id))).value;
+  if (!uaSnap) throw new Error("the per-UA index entry was not written under the bounded UA");
+});
+
+Deno.test("a seed record still over budget after value caps falls back to metadata-only", async () => {
+  await clearKv();
+  const kv = await testKv();
+  // 20 headers exactly AT the per-value cap: nothing to truncate, the record is
+  // over MAX_RECORD_BYTES on header count alone, so the fallback must engage.
+  const headers: Record<string, string> = { "user-agent": UA };
+  for (let i = 0; i < 20; i++) headers[`x-big-${i}`] = "h".repeat(MAX_HEADER_VALUE_CHARS);
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  let response: Response;
+  try {
+    console.warn = (message: string) => warnings.push(message);
+    response = await handler(req("/", { headers }), connInfo(IP));
+  } finally {
+    console.warn = originalWarn;
+  }
+  if (response.status !== 200) throw new Error(`many-header homepage returned ${response.status}`);
+  const { id } = traceBaseFromHtml(await response.text());
+  const rec = (await kv.get<TraceRecord>(["trace", id])).value;
+  if (!rec) throw new Error("the trace was not stored");
+  if (Object.keys(rec.headers).length !== 0) {
+    throw new Error("the metadata-only fallback kept headers");
+  }
+  if (rec.ua !== UA || rec.ip !== IP) {
+    throw new Error("the fallback lost the identity it exists to keep");
+  }
+  const seedWarn = warnings.filter((w) => w.startsWith("[seed]"));
+  if (seedWarn.length !== 1 || seedWarn[0].includes("hhh")) {
+    throw new Error(`expected one bounded seed warning, got ${JSON.stringify(warnings)}`);
+  }
+});
+
+Deno.test("an oversized claimed x-forwarded-for is bounded in the seed record", async () => {
+  await clearKv();
+  const kv = await testKv();
+  // No connInfo: the handler falls back to the claimed forwarding header, which is
+  // client-controlled text of arbitrary length.
+  const response = await handler(
+    req("/", { headers: { "user-agent": UA, "x-forwarded-for": "f".repeat(70_000) } }),
+  );
+  if (response.status !== 200) throw new Error(`claimed-xff homepage returned ${response.status}`);
+  const { id } = traceBaseFromHtml(await response.text());
+  const rec = (await kv.get<TraceRecord>(["trace", id])).value;
+  if (!rec) throw new Error("the trace was not stored");
+  if (rec.ip !== "f".repeat(MAX_TRACE_IP_CHARS)) {
+    throw new Error(`claimed ip was not bounded: ${rec.ip.length} chars`);
+  }
+});
+
+Deno.test("an oversized trace cookie mints a fresh trace instead of throwing", async () => {
+  await clearKv();
+  // kv.get refuses key parts over 2049 bytes ("Key too large for read"), so an
+  // unbounded cookie claim used to throw out of the reuse lookup as a 500.
+  const response = await handler(
+    req("/", { headers: { "user-agent": UA, cookie: `ua-tracer-trace=${"a".repeat(100_000)}` } }),
+    connInfo(IP),
+  );
+  if (response.status !== 200) throw new Error(`oversized cookie returned ${response.status}`);
+  if (await countPrefix(["trace"]) !== 1) {
+    throw new Error("expected exactly one freshly minted trace");
+  }
+});
+
+// ---- ua-tracer-4dh: the truncation marker lives inside the reserved namespace ----
+// "x-payload-truncated" used to be a bare literal at boundRecord's call sites, outside
+// SYNTHETIC_HEADER_PREFIXES, so a client could send the header itself and have it stored
+// and rendered verbatim — forged evidence that the server dropped a payload when it did
+// not. It is now EVIDENCE_KEYS.payloadTruncated under the reserved "x-payload-" prefix,
+// stripped at both the request ingress (clientHeaders) and the write boundary
+// (withEvidence).
+
+Deno.test("x-payload-truncated is reserved and stripped like the other evidence names", () => {
+  for (const name of ["x-payload-truncated", "X-Payload-Truncated", "x-PAYLOAD-truncated"]) {
+    if (!isSyntheticHeaderName(name)) {
+      throw new Error(`truncation marker was not recognized as reserved: ${name}`);
+    }
+  }
+  if (EVIDENCE_KEYS.payloadTruncated !== "x-payload-truncated") {
+    throw new Error("the marker is not in EVIDENCE_KEYS");
+  }
+});
+
+Deno.test("a client cannot forge the truncation marker through a probe request", async () => {
+  await clearKv();
+  const { id, secret } = await mintOnce();
+  const forged = "payload dropped: 999999 bytes over the 61440-byte budget";
+  const response = await handler(
+    req(`/r/${id}/${secret}/main.js`, {
+      headers: { "user-agent": UA, "x-payload-truncated": forged },
+    }),
+    connInfo(IP),
+  );
+  if (response.status !== 200) throw new Error(`probe returned ${response.status}`);
+  const stored = (await listHits(id)).find((h) => h.kind === "js");
+  if (!stored) throw new Error("the js probe was not recorded");
+  if (EVIDENCE_KEYS.payloadTruncated in stored.headers) {
+    throw new Error("the forged truncation marker was stored as evidence");
+  }
+  // The render must not show a truncation the server never made.
+  const detail = await (await handler(req(`/trace/${id}`))).text();
+  if (detail.includes(forged)) {
+    throw new Error("the forged marker was rendered in the trace view");
+  }
+});
+
+Deno.test("a direct writer cannot forge the truncation marker past the write boundary", async () => {
+  await clearKv();
+  const { id } = await mintOnce();
+  await logHit({
+    ...hitRec(id, "css", Date.now()),
+    headers: { "x-payload-truncated": "forged by a writer that skipped clientHeaders" },
+  });
+  const stored = (await listHits(id)).find((h) => h.kind === "css");
+  if (!stored) throw new Error("the hit was not recorded");
+  if (EVIDENCE_KEYS.payloadTruncated in stored.headers) {
+    throw new Error("a reserved marker survived a direct write");
+  }
+});
+
+Deno.test("a genuine server-side truncation still writes the marker", async () => {
+  await clearKv();
+  const { id } = await mintOnce();
+  // An over-budget timing payload: boundRecord must still annotate the record it
+  // strips, now through EVIDENCE_KEYS rather than a literal.
+  const fat: HitRecord = {
+    ...hitRec(id, "report", Date.now()),
+    timing: Array.from({ length: 400 }, (_, i) => ({
+      name: `https://uatracer.com/r/t/${"p".repeat(120)}-${i}.css`,
+      entryType: "resource",
+      startTime: i,
+      duration: 1.5,
+      initiatorType: "link",
+      transferSize: 1024,
+      decodedBodySize: 2048,
+      encodedBodySize: 1024,
+      responseStatus: 200,
+      nextHopProtocol: "h2",
+      renderBlockingStatus: "blocking",
+    })),
+  };
+  await logHit(fat);
+  const stored = (await listHits(id)).find((h) => h.kind === "report");
+  if (!stored) throw new Error("the bounded probe was lost");
+  const marker = stored.headers[EVIDENCE_KEYS.payloadTruncated];
+  if (!marker || !marker.startsWith("payload dropped:")) {
+    throw new Error(`the genuine truncation is not marked: ${JSON.stringify(stored.headers)}`);
   }
 });

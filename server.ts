@@ -546,7 +546,11 @@ async function handleHomepage(
   const cookieMatch = cookieHeader.match(
     new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([a-zA-Z0-9_-]+)`),
   );
-  if (cookieMatch) {
+  if (cookieMatch && cookieMatch[1].length <= 64) {
+    // The cookie is client-controlled text of arbitrary length; only an id-shaped
+    // claim (a minted shortId is 11 chars) may become a KV key part. An oversized
+    // claim used to throw "key too large" out of the lookup as an unhandled 500
+    // (ua-tracer-dpb). A rejected claim simply mints a fresh trace.
     const candidate = cookieMatch[1];
     const kv = await getKv();
     const existing = await kv.get<TraceRecord>(["trace", candidate]);
@@ -588,9 +592,18 @@ async function handleHomepage(
       verified,
     };
 
-    await seedTrace(rec, seedStats);
-    // Also log the homepage itself as a hit so the trace waterfall has a root.
-    await logHit({ id, kind: "homepage", ts, ua, ip, method: req.method, headers });
+    try {
+      await seedTrace(rec, seedStats);
+      // Also log the homepage itself as a hit so the trace waterfall has a root.
+      await logHit({ id, kind: "homepage", ts, ua, ip, method: req.method, headers });
+    } catch {
+      // Minting is best-effort at the storage layer: seedTrace bounds the record
+      // itself (ua-tracer-dpb), so what can still fail here is KV being down or
+      // refusing the write. The page must still serve — degraded, with the trace
+      // missing from the store — rather than 500. Keep untrusted values (ua,
+      // headers, claimed ip) out of the warning; the id is server-minted.
+      console.warn(`[homepage] failed to seed trace ${id}; serving page without a stored trace`);
+    }
 
     console.log(`[homepage] trace=${id} ip=${ip} ua="${ua.slice(0, 80)}"`);
   } else {

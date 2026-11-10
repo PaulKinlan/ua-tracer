@@ -31,8 +31,10 @@ export function redactHeaders(headers: Record<string, string>): Record<string, s
   );
 }
 
-// These prefixes are RESERVED for evidence this module stores after reading a probe
-// body. A client can put any header name it likes on a request, so a hit must never
+// These prefixes are RESERVED for evidence this module stores itself: after reading a
+// probe body (x-report-, x-timing-) or when bounding an over-budget record
+// (x-payload-, written by boundRecord — ua-tracer-4dh). A client can put any header
+// name it likes on a request, so a hit must never
 // take one of these from the wire: they are the difference between "the beacon
 // arrived and its body was captured" and "the client says it did" (ua-tracer-0l9).
 //
@@ -42,7 +44,7 @@ export function redactHeaders(headers: Record<string, string>): Record<string, s
 // silently, so the reservation is enforced at the persistence boundary too
 // (withEvidence below), and `evidence` is the one explicit channel that may write a
 // reserved name (ua-tracer-egg).
-export const SYNTHETIC_HEADER_PREFIXES = ["x-report-", "x-timing-"] as const;
+export const SYNTHETIC_HEADER_PREFIXES = ["x-report-", "x-timing-", "x-payload-"] as const;
 
 export function isSyntheticHeaderName(name: string): boolean {
   const normalized = name.toLowerCase();
@@ -58,6 +60,7 @@ export const EVIDENCE_KEYS = {
   reportRejected: "x-report-rejected",
   timingTruncated: "x-timing-truncated",
   timingRejected: "x-timing-rejected",
+  payloadTruncated: "x-payload-truncated",
 } as const;
 
 /** Server-derived evidence about a probe body. Reserved names only; anything else is dropped. */
@@ -265,20 +268,74 @@ export async function casRetry(
   }
 }
 
+/** The KV per-value cap is 65536 bytes (measured); keep a working margin below it. */
+export const MAX_RECORD_BYTES = 48 * 1024;
+
+// Storage caps for the client-shaped fields of a trace seed (ua-tracer-dpb). The UA
+// also becomes an index KEY segment through normUa, so an unbounded UA breaks the
+// atomic on the key limit even when the record itself would fit; 200 chars matches
+// the identity-only bound commitHit already applies to hit records.
+export const MAX_TRACE_UA_CHARS = 200;
+export const MAX_TRACE_IP_CHARS = 64;
+const MAX_TRACE_METHOD_CHARS = 16;
+
+function encodedSize(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+/**
+ * Keep the trace seed inside the KV value and key caps BEFORE writing it
+ * (ua-tracer-dpb). The seed used to be committed unbounded: a GET / carrying
+ * large headers made the atomic throw "Key or value too large" out of
+ * handleHomepage as an unhandled 500, and no trace was minted at all — the
+ * opposite of invariant I4, which requires the visit to be recorded and any
+ * refusal to be loud rather than fatal. Like boundRecord for hits, this caps
+ * the client-shaped fields first and falls back to metadata-only if the record
+ * is still over budget; the identity, timestamp and bot verdict are all the
+ * indexes and the trace view need.
+ */
+export function boundSeedRecord(rec: TraceRecord, warn: (line: string) => void): TraceRecord {
+  const headers = redactHeaders(rec.headers);
+  for (const [name, value] of Object.entries(headers)) {
+    if (value.length > MAX_HEADER_VALUE_CHARS) {
+      headers[name] = `${value.slice(0, MAX_HEADER_VALUE_CHARS)}…[truncated]`;
+    }
+  }
+  const bounded: TraceRecord = {
+    ...rec,
+    ua: rec.ua.slice(0, MAX_TRACE_UA_CHARS),
+    ip: rec.ip.slice(0, MAX_TRACE_IP_CHARS),
+    method: rec.method.slice(0, MAX_TRACE_METHOD_CHARS),
+    headers,
+  };
+  if (encodedSize(bounded) <= MAX_RECORD_BYTES) return bounded;
+  // Still over budget: too many capped-but-huge headers. Headers are the only
+  // part a client can inflate, so they are the part that goes. rec.id is a
+  // server-minted shortId — safe to name in the warning; header content is not.
+  warn(
+    `[seed] trace ${bounded.id} seed record exceeded the KV value limit; stored without headers`,
+  );
+  return { ...bounded, headers: {} };
+}
+
 // Seed all three indexes before recording the homepage hit. The recent and UA
 // values are complete snapshots; the shared UA aggregate needs its own CAS.
 export async function seedTrace(rec: TraceRecord, stats: TraceStats): Promise<void> {
+  const boundedRec = boundSeedRecord(rec, (line) => console.warn(line));
+  // The snapshots must carry the SAME bounded ua/ip as the record: the ua is a
+  // segment of the index key, and the views render the snapshot, not the record.
+  const boundedStats: TraceStats = { ...stats, ua: boundedRec.ua, ip: boundedRec.ip };
   const kv = await getKv();
   await kv.atomic()
-    .set(["trace", rec.id], { ...rec, headers: redactHeaders(rec.headers) })
-    .set(recentIndexKey(rec.ts, rec.id), stats)
-    .set(uaIndexKey(rec.ua, rec.ts, rec.id), stats)
+    .set(["trace", boundedRec.id], boundedRec)
+    .set(recentIndexKey(boundedRec.ts, boundedRec.id), boundedStats)
+    .set(uaIndexKey(boundedRec.ua, boundedRec.ts, boundedRec.id), boundedStats)
     .commit();
-  const aKey = uaAggKey(rec.ua);
-  await casRetry(`ua aggregate ${normUa(rec.ua)}`, async () => {
+  const aKey = uaAggKey(boundedRec.ua);
+  await casRetry(`ua aggregate ${normUa(boundedRec.ua)}`, async () => {
     const aggCur = await kv.get<UaAggregate>(aKey);
     const agg = aggCur.value ??
-      { ua: rec.ua || "(no user-agent)", count: 0, jsRan: 0 };
+      { ua: boundedRec.ua || "(no user-agent)", count: 0, jsRan: 0 };
     const res = await kv.atomic()
       .check({ key: aKey, versionstamp: aggCur.versionstamp })
       .set(aKey, { ua: agg.ua, count: agg.count + 1, jsRan: agg.jsRan })
@@ -286,9 +343,6 @@ export async function seedTrace(rec: TraceRecord, stats: TraceStats): Promise<vo
     return res.ok;
   });
 }
-
-/** The KV per-value cap is 65536 bytes (measured); keep a working margin below it. */
-export const MAX_RECORD_BYTES = 48 * 1024;
 
 export interface HitCommitOptions {
   /** CAS retry bound. Tests inject a few ms so the give-up path is reachable fast. */
@@ -299,10 +353,6 @@ export interface HitCommitOptions {
 
 /** How a hit's record and its count were reconciled. */
 export type HitCommitOutcome = "committed" | "recorded-alone" | "no-trace";
-
-function encodedSize(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).length;
-}
 
 /** Drop the client-supplied display payload: it is what can push a record over the cap. */
 function stripPayload(rec: HitRecord): HitRecord {
@@ -321,7 +371,7 @@ function stripPayload(rec: HitRecord): HitRecord {
  * pass still counts it, and the truncation is marked in the record and warned about
  * rather than being silent.
  */
-const MAX_HEADER_VALUE_CHARS = 4096;
+export const MAX_HEADER_VALUE_CHARS = 4096;
 
 /**
  * A client can send very long header values. Those are what the cheap early-out above
@@ -352,7 +402,7 @@ function boundRecord(rec: HitRecord, warn: (line: string) => void): HitRecord {
   const stripped = stripPayload(rec);
   let bounded: HitRecord = {
     ...stripped,
-    headers: { ...stripped.headers, "x-payload-truncated": marker },
+    headers: { ...stripped.headers, [EVIDENCE_KEYS.payloadTruncated]: marker },
   };
   if (encodedSize(bounded) > MAX_RECORD_BYTES) {
     // Even the metadata is over budget (a client can send very long header values).
@@ -364,7 +414,7 @@ function boundRecord(rec: HitRecord, warn: (line: string) => void): HitRecord {
       ua: rec.ua.slice(0, 200),
       ip: rec.ip,
       method: rec.method,
-      headers: { "x-payload-truncated": marker },
+      headers: { [EVIDENCE_KEYS.payloadTruncated]: marker },
     };
   }
   warn(

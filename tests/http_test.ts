@@ -297,6 +297,50 @@ Deno.test("a wrong or absent secret 404s and logs nothing", async () => {
   if (after !== before) throw new Error("a rejected probe was still logged");
 });
 
+Deno.test("a crafted path segment 404s without reflecting into a probe body", async () => {
+  await clearKv();
+  const { id } = await mint();
+  const before = (await hitsOf(id)).length;
+  // The vuln-triage PoC (tm-probe-body-reflects-path, ua-tracer-82v): attacker
+  // text in the id segment, previously reflected verbatim into a text/css body
+  // even though no trace exists under that id. The router gate must reject it
+  // with the same 404 a missing trace gets.
+  const crafted = await handler(req("/r/test%22)%7Dbody%7Bcolor:red%7D/style.css"));
+  const craftedBody = await crafted.text();
+  if (crafted.status !== 404) throw new Error(`crafted id -> ${crafted.status}`);
+  if (craftedBody.includes("body{color:red}")) throw new Error("crafted id was reflected");
+  // Segments outside the minted alphabet are rejected wherever they sit: an
+  // over-long id, or a secret segment carrying a character shortId never
+  // emits. (On a secret-bearing trace the secret compare would 404 anyway, so
+  // that case is pinned on a legacy trace below, where the compare passes.)
+  for (const path of [`/r/${"a".repeat(65)}/style.css`, `/r/${id}/deadbeef*/style.css`]) {
+    const res = await handler(req(path));
+    if (res.status !== 404) throw new Error(`${path} -> ${res.status}`);
+  }
+  // Legacy traces accept an extra secret segment, but only one shaped like the
+  // ids the server mints — a crafted one gets the not-found response.
+  const kv = await testKv();
+  const ts = Date.now();
+  const legacy: TraceRecord = { id: "legacyid", ts, ua: UA, ip: IP, method: "GET", headers: {} };
+  await kv.set(["trace", "legacyid"], legacy);
+  const legacyCrafted = await handler(req("/r/legacyid/%22%3B/style.css"));
+  if (legacyCrafted.status !== 404) {
+    throw new Error(`crafted secret segment on legacy trace -> ${legacyCrafted.status}`);
+  }
+  await legacyCrafted.text();
+  // Nothing rejected here may have been logged anywhere.
+  if ((await hitsOf(id)).length !== before || await countPrefix(["hit"]) !== before) {
+    throw new Error("a rejected crafted probe was still logged");
+  }
+  // The boundary inside the alphabet still serves: a 64-char id on an unknown
+  // trace gets the asset (bot probes read these) without persisting a hit.
+  const maxId = "a".repeat(64);
+  const ok = await handler(req(`/r/${maxId}/style.css`));
+  const okBody = await ok.text();
+  if (ok.status !== 200) throw new Error(`64-char id -> ${ok.status}`);
+  if (!okBody.includes(`/r/${maxId}/import.css`)) throw new Error("64-char id body corrupted");
+});
+
 Deno.test("unknown trace probes still serve assets without persisting orphan hits", async () => {
   await clearKv();
   const id = "missingtrace";

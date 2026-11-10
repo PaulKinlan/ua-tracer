@@ -11,6 +11,7 @@ import {
   assetBase,
   assetKind,
   cssBody,
+  cssSafeSegment,
   GIF_1x1,
   ICO_FAVICON,
   jsBody,
@@ -284,6 +285,13 @@ export function timingNote(bounded: BoundedTiming): string {
   } (kept ${bounded.timing.length}; budget ${MAX_TIMING_BYTES} bytes / ${MAX_TIMING_ENTRIES} entries)`;
 }
 
+// The only path segments the router admits for a probe id or secret. This is
+// exactly the alphabet shortId() mints, so every legitimate trace passes; a
+// segment carrying quotes, braces, percent-escapes or over-length text is a
+// crafted probe. Enforced where both URL shapes converge (handleAsset), before
+// any KV lookup or logging.
+const PROBE_SEGMENT = /^[0-9a-zA-Z_-]{1,64}$/;
+
 async function handleAsset(
   req: Request,
   id: string,
@@ -291,6 +299,18 @@ async function handleAsset(
   ip: string,
   providedSecret?: string,
 ): Promise<Response> {
+  // Invariant I6 (tm-probe-body-reflects-path, ua-tracer-82v): id and secret
+  // are interpolated into the generated probe bodies, so an unvalidated path
+  // segment could carry attacker-authored text into a text/css (or JS/HTML)
+  // response. Reject anything outside PROBE_SEGMENT with the same 404 a
+  // missing trace gets, before the trace lookup — nothing is reflected and
+  // nothing is logged for a segment that could not have come from a minted
+  // probe URL.
+  if (
+    !PROBE_SEGMENT.test(id) || (providedSecret !== undefined && !PROBE_SEGMENT.test(providedSecret))
+  ) {
+    return new Response("Not found", { status: 404 });
+  }
   const ua = req.headers.get("user-agent") ?? "";
   const ts = Date.now();
   const headers = clientHeaders(req.headers);
@@ -480,7 +500,9 @@ async function handleAsset(
       });
     case "import.css":
       return new Response(
-        `/* ua-tracer @import target for trace ${id} — fetching this proves the UA followed an @import */\n.ua-tracer-imported{color:rgb(1,2,3)}\n`,
+        `/* ua-tracer @import target for trace ${
+          cssSafeSegment(id)
+        } — fetching this proves the UA followed an @import */\n.ua-tracer-imported{color:rgb(1,2,3)}\n`,
         { headers: noStore({ "content-type": "text/css; charset=utf-8" }) },
       );
     case "csp-report":

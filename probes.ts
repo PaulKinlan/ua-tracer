@@ -9,6 +9,23 @@ export function assetBase(id: string, secret?: string): string {
   return secret ? `/r/${id}/${secret}` : `/r/${id}`;
 }
 
+// Invariant I6 (tm-probe-body-reflects-path, ua-tracer-82v): generated CSS
+// reflects path segments, so a segment must not be able to break out of a
+// url("...") string or close a /* */ comment early. CSS has no escape syntax
+// inside comments, so the safe transform replaces every byte outside the
+// router's segment alphabet with a CSS hex escape: inside a string the escape
+// resolves to the original character, and inside a comment it is inert text
+// that can never form `*/` (the replacement emits only `\`, hex digits and
+// spaces — never `*`, `/` or a quote). The router gate in server.ts already
+// admits only [0-9a-zA-Z_-]{1,64} segments, so for current callers this is a
+// no-op belt-and-braces layer that keeps I6 true even if a caller skips it.
+export function cssSafeSegment(segment: string): string {
+  return segment.replace(
+    /[^0-9a-zA-Z_-]/g,
+    (c) => `\\${c.charCodeAt(0).toString(16).padStart(2, "0")} `,
+  );
+}
+
 function decodeBase64(b64: string): Uint8Array<ArrayBuffer> {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -164,7 +181,10 @@ export const ICO_FAVICON = decodeBase64(
 // we tag it "unverifiable" rather than pretend we know.
 
 export function cssBody(id: string, secret?: string): string {
-  const base = assetBase(id, secret);
+  const base = assetBase(
+    cssSafeSegment(id),
+    secret === undefined ? undefined : cssSafeSegment(secret),
+  );
   // References two further probes: a background image and an @font-face source.
   // The .ua-tracer-probe element in the page renders with this rule, which
   // forces a real engine to fetch both CSS-linked resources:
@@ -180,7 +200,7 @@ export function cssBody(id: string, secret?: string): string {
   // @import is at the very top (required by CSS). Fetching import.css proves the
   // UA followed a stylesheet imported from inside another stylesheet.
   return `@import url("${base}/import.css");
-/* ua-tracer probe stylesheet for trace ${id} */
+/* ua-tracer probe stylesheet for trace ${cssSafeSegment(id)} */
 @font-face {
   font-family: "uatracerprobe";
   src: url("${base}/css-font.woff2") format("woff2");

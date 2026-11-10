@@ -25,9 +25,12 @@ import {
   isSyntheticHeaderName,
   listHits,
   logHit,
+  MAX_HEADER_VALUE_CHARS,
   MAX_PROBE_PATH_CHARS,
   MAX_PROBE_UA_CHARS,
   MAX_RECORD_BYTES,
+  MAX_TRACE_IP_CHARS,
+  MAX_TRACE_UA_CHARS,
 } from "../storage.ts";
 import { runBackfill } from "../backfill.ts";
 
@@ -850,5 +853,108 @@ Deno.test("a mixed-case evidence body is stripped from an over-budget record too
   }
   for (const name of [EVIDENCE_KEYS.reportBody, "X-Report-Body"]) {
     if (name in stored.headers) throw new Error(`an over-budget evidence body survived as ${name}`);
+  }
+});
+
+// ---- ua-tracer-dpb: the trace seed is bounded against the KV value and key caps ----
+// seedTrace used to commit the request-shaped record unchecked, so a GET / with large
+// headers threw "Key or value too large" out of handleHomepage as an unhandled 500 and
+// no trace was minted at all. These tests pin the bounded-seed contract: cap the
+// client-shaped fields, truncate header values, fall back to metadata-only, and never
+// let the homepage fail because of what the client sent.
+
+Deno.test("an oversized homepage header and UA mint a bounded trace, not a 500", async () => {
+  await clearKv();
+  const kv = await testKv();
+  const hugeUa = "u".repeat(70_000);
+  const response = await handler(
+    req("/", { headers: { "user-agent": hugeUa, "x-huge": "h".repeat(70_000) } }),
+    connInfo(IP),
+  );
+  if (response.status !== 200) {
+    throw new Error(`oversized homepage returned ${response.status}`);
+  }
+  const { id } = traceBaseFromHtml(await response.text());
+  const rec = (await kv.get<TraceRecord>(["trace", id])).value;
+  if (!rec) throw new Error("the trace was not stored");
+  if (JSON.stringify(rec).length > MAX_RECORD_BYTES) {
+    throw new Error(`seed stored ${JSON.stringify(rec).length} bytes, over the budget`);
+  }
+  if (rec.ua !== hugeUa.slice(0, MAX_TRACE_UA_CHARS)) {
+    throw new Error(`seed UA was not bounded: ${rec.ua.length} chars`);
+  }
+  const huge = rec.headers["x-huge"];
+  if (!huge || huge.length > MAX_HEADER_VALUE_CHARS + 20 || !huge.endsWith("[truncated]")) {
+    throw new Error("the huge header value was not truncated and marked");
+  }
+  // The snapshot feeds the index KEY (normUa), so it must carry the same bounded UA.
+  const snap = (await kv.get<TraceStats>(recentIndexKey(rec.ts, id))).value;
+  if (!snap || snap.ua !== rec.ua || snap.ip !== rec.ip) {
+    throw new Error("the recent-index snapshot does not carry the bounded identity");
+  }
+  const uaSnap = (await kv.get<TraceStats>(uaIndexKey(rec.ua, rec.ts, id))).value;
+  if (!uaSnap) throw new Error("the per-UA index entry was not written under the bounded UA");
+});
+
+Deno.test("a seed record still over budget after value caps falls back to metadata-only", async () => {
+  await clearKv();
+  const kv = await testKv();
+  // 20 headers exactly AT the per-value cap: nothing to truncate, the record is
+  // over MAX_RECORD_BYTES on header count alone, so the fallback must engage.
+  const headers: Record<string, string> = { "user-agent": UA };
+  for (let i = 0; i < 20; i++) headers[`x-big-${i}`] = "h".repeat(MAX_HEADER_VALUE_CHARS);
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  let response: Response;
+  try {
+    console.warn = (message: string) => warnings.push(message);
+    response = await handler(req("/", { headers }), connInfo(IP));
+  } finally {
+    console.warn = originalWarn;
+  }
+  if (response.status !== 200) throw new Error(`many-header homepage returned ${response.status}`);
+  const { id } = traceBaseFromHtml(await response.text());
+  const rec = (await kv.get<TraceRecord>(["trace", id])).value;
+  if (!rec) throw new Error("the trace was not stored");
+  if (Object.keys(rec.headers).length !== 0) {
+    throw new Error("the metadata-only fallback kept headers");
+  }
+  if (rec.ua !== UA || rec.ip !== IP) {
+    throw new Error("the fallback lost the identity it exists to keep");
+  }
+  const seedWarn = warnings.filter((w) => w.startsWith("[seed]"));
+  if (seedWarn.length !== 1 || seedWarn[0].includes("hhh")) {
+    throw new Error(`expected one bounded seed warning, got ${JSON.stringify(warnings)}`);
+  }
+});
+
+Deno.test("an oversized claimed x-forwarded-for is bounded in the seed record", async () => {
+  await clearKv();
+  const kv = await testKv();
+  // No connInfo: the handler falls back to the claimed forwarding header, which is
+  // client-controlled text of arbitrary length.
+  const response = await handler(
+    req("/", { headers: { "user-agent": UA, "x-forwarded-for": "f".repeat(70_000) } }),
+  );
+  if (response.status !== 200) throw new Error(`claimed-xff homepage returned ${response.status}`);
+  const { id } = traceBaseFromHtml(await response.text());
+  const rec = (await kv.get<TraceRecord>(["trace", id])).value;
+  if (!rec) throw new Error("the trace was not stored");
+  if (rec.ip !== "f".repeat(MAX_TRACE_IP_CHARS)) {
+    throw new Error(`claimed ip was not bounded: ${rec.ip.length} chars`);
+  }
+});
+
+Deno.test("an oversized trace cookie mints a fresh trace instead of throwing", async () => {
+  await clearKv();
+  // kv.get refuses key parts over 2049 bytes ("Key too large for read"), so an
+  // unbounded cookie claim used to throw out of the reuse lookup as a 500.
+  const response = await handler(
+    req("/", { headers: { "user-agent": UA, cookie: `ua-tracer-trace=${"a".repeat(100_000)}` } }),
+    connInfo(IP),
+  );
+  if (response.status !== 200) throw new Error(`oversized cookie returned ${response.status}`);
+  if (await countPrefix(["trace"]) !== 1) {
+    throw new Error("expected exactly one freshly minted trace");
   }
 });

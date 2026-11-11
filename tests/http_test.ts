@@ -607,6 +607,20 @@ Deno.test("/trace/{id} renders the waterfall, and an unknown id 404s", async () 
   await missing.text();
 });
 
+// ua-tracer-6v1: the trace id becomes a KV key part, so a segment that could not have been
+// minted must be refused BEFORE the lookup. It used to reach kv.get, which throws "Key too
+// large", and the handler's I6 catch turned that into a 500 for any client that sent a long
+// URL - while every other id-bearing route already 404s a junk segment (handleAsset).
+// Mutation check: delete the PROBE_SEGMENT guard in handleTrace and this case throws instead.
+Deno.test("an oversized /trace/{id} 404s instead of throwing on an oversized KV key", async () => {
+  await clearKv();
+  const res = await handler(req(`/trace/${"A".repeat(3000)}`));
+  if (res.status !== 404) throw new Error(`oversized trace id -> ${res.status}`);
+  const html = await res.text();
+  if (!html.includes("Trace not found")) throw new Error("oversized id lost the 404 page");
+  if (await countPrefix(["trace"]) !== 0) throw new Error("a rejected trace id wrote to KV");
+});
+
 Deno.test("a non-GET/HEAD request to / is not treated as a homepage hit", async () => {
   await clearKv();
   const res = await handler(req("/", { method: "POST" }));

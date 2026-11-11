@@ -745,21 +745,30 @@ async function handleTraces(req: Request): Promise<Response> {
   );
 }
 
+function traceNotFoundHtml(id: string): Response {
+  return new Response(
+    pageShell(
+      "trace not found",
+      `<h2>Trace not found</h2><p>No trace with id <code>${
+        escapeHtml(id)
+      }</code>.</p><p><a href="/">← back</a></p>`,
+      "/traces",
+    ),
+    { status: 404, headers: { "content-type": "text/html; charset=utf-8" } },
+  );
+}
+
 async function handleTrace(id: string): Promise<Response> {
+  // The id becomes a KV key part, so it has to be id-shaped BEFORE it is used as one:
+  // an oversized segment makes kv.get throw "Key too large", and the handler's I6 catch
+  // turns a client-chosen long URL into a 500 with an error-log line (ua-tracer-6v1).
+  // A minted id is 11 chars of [0-9a-zA-Z], so anything outside PROBE_SEGMENT cannot
+  // exist and gets the same 404 an unknown id gets - exactly the rule the probe routes
+  // already apply to `id`/`secret` before their lookup (handleAsset).
+  if (!PROBE_SEGMENT.test(id)) return traceNotFoundHtml(id);
   const kv = await getKv();
   const trace = await kv.get<TraceRecord>(["trace", id]);
-  if (!trace.value) {
-    return new Response(
-      pageShell(
-        "trace not found",
-        `<h2>Trace not found</h2><p>No trace with id <code>${
-          escapeHtml(id)
-        }</code>.</p><p><a href="/">← back</a></p>`,
-        "/traces",
-      ),
-      { status: 404, headers: { "content-type": "text/html; charset=utf-8" } },
-    );
-  }
+  if (!trace.value) return traceNotFoundHtml(id);
   const hits = await listHits(id);
   return new Response(traceDetailHtml(trace.value, hits), {
     headers: noStore({ "content-type": "text/html; charset=utf-8" }),

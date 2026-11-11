@@ -14,8 +14,8 @@ for lanes.
 ua-tracer answers "when a user agent fetches a page, what does it actually fetch and does it run the
 JS?". It is a single Deno Deploy app (live at uatracer.com):
 
-- `server.ts` is the only entrypoint (`handler`, server.ts:995). `import.meta.main` guards the
-  `Deno.serve` call (server.ts:1023-1029), so importing the file in a script or a test starts
+- `server.ts` is the only entrypoint (`handler`, server.ts:1004). `import.meta.main` guards the
+  `Deno.serve` call (server.ts:1032-1038), so importing the file in a script or a test starts
   nothing. It routes every request, mints one trace per homepage GET, serves probe assets under
   `/r/{id}/{secret}/{asset}`, and applies response headers.
 - `storage.ts` persists traces, hits and probe logs in Deno KV (schema at storage.ts:95-131).
@@ -34,7 +34,7 @@ JS?". It is a single Deno Deploy app (live at uatracer.com):
 Anonymous internet client (any UA, any headers, any URL, any POST body)
         │  HTTPS
         ▼
-Deno Deploy edge ──► handler/routeHandler (server.ts:877,995) ──► Deno KV (storage.ts)
+Deno Deploy edge ──► handler/routeHandler (server.ts:886,1004) ──► Deno KV (storage.ts)
         │                    │
         │                    ├─► operator-published bot-range feeds (HTTPS GET,
         │                    │   bot-verification.ts:117) — external data a verdict reads
@@ -71,7 +71,7 @@ Actors:
   entries intentional and narrow.
 - **Operator-local execution**: `deno task backfill*`, `deploy-check.ts`, tests (hermetic `:memory:`
   KV per tests/testenv.ts). Local KV and `DENO_KV_URL` are operator-held.
-- **`/api/health` disclosures** (server.ts:886-913): build id, repair schedule state, timestamps —
+- **`/api/health` disclosures** (server.ts:896-925): build id, repair schedule state, timestamps —
   deliberately non-secret deploy-verification signals.
 - **Probe assets served for unknown traces** (server.ts:411-417): serving a static asset body to a
   bot without recording a hit is intentional (probe reachability), not an information leak — the
@@ -112,11 +112,13 @@ Actors:
 
 ### 4.3 Probe URL segments: `/r/{id}[/{secret}]/{asset}`
 
-- Router regexes split the path (server.ts:937-951); `handleAsset` then gates both `id` and `secret`
+- Router regexes split the path (server.ts:946-960); `handleAsset` then gates both `id` and `secret`
   against `PROBE_SEGMENT = /^[0-9a-zA-Z_-]{1,64}$/` (server.ts:301-310) — exactly the alphabet
   `shortId()` mints — before any KV lookup, logging, or body generation. A crafted segment gets the
   same 404 a missing trace gets: nothing is reflected, nothing is logged (invariant I6 /
-  ua-tracer-82v).
+  ua-tracer-82v). The `/trace/{id}` read applies the same gate before its own lookup (server.ts:768)
+  for the same reason the probe routes do: a segment that could not have been minted must never
+  become a KV key part (ua-tracer-6v1).
 - The secret check (server.ts:325-347) returns **404 indistinguishable from not-found** for a
   wrong/missing secret on a secret-bearing trace, and legacy `/r/{id}/…` URLs are refused for
   secret-bearing traces — probes cannot enumerate traces or secrets.
@@ -210,9 +212,9 @@ evidence namespace, three times for address normalisation).
 | Stored XSS / reflection                                | ua-tracer-4p0 (P1, `368d463`: unescaped `initiatorType`, forwarded host poisoning og/twitter meta); ua-tracer-82v (`d981466`: crafted `/r/` segment reflected as text/css)                      | `escapeHtml` everywhere (views.ts:53); canonical/og meta URLs from `CANONICAL_ORIGIN` (views.ts:433, 599-600); `PROBE_SEGMENT` (server.ts:301) + `cssSafeSegment` (probes.ts:22) |
 | Credential disclosure via stored headers               | ua-tracer-780 (P2, `7e28686`: Authorization/Cookie persisted and rendered)                                                                                                                      | redaction at ingest, at write, and re-applied on read (storage.ts:22-31)                                                                                                         |
 | Unbounded unauthenticated writes / enumeration         | ua-tracer-0l8 (`97b0e6f`: orphan hits for unknown traces); ua-tracer-9v6 (wrong secret writes nothing)                                                                                          | unknown-trace probes serve but persist nothing (server.ts:411-417); indistinguishable 404s (server.ts:325-347); per-trace secret `5f5a472`                                       |
-| Oversized client input → unhandled 500 / lost record   | ua-tracer-dpb (cookie key), ua-tracer-6zl (identity fields), ua-tracer-emp (rejected record), ua-tracer-0ms/`c6c1081` (bodies at the read)                                                      | bounds before write + loud record-alone fallback (storage.ts:279-304, 394, 586; server.ts:158-208)                                                                               |
+| Oversized client input → unhandled 500 / lost record   | ua-tracer-dpb (cookie key), ua-tracer-6zl (identity fields), ua-tracer-emp (rejected record), ua-tracer-0ms/`c6c1081` (bodies at the read), ua-tracer-6v1 (`/trace/{id}` key)                   | bounds before write + loud record-alone fallback (storage.ts:279-304, 394, 586; server.ts:158-208), and `PROBE_SEGMENT` before an id becomes a KV key (server.ts:301, 768)       |
 | Silent counter loss under concurrency                  | ua-tracer-3re, -plx, -5ub, -6sn, -swf; accuracy-over-latency trade ua-tracer-c02                                                                                                                | CAS deadline + record/increment fold + unique hit keys (storage.ts:248-270, 470, 632)                                                                                            |
-| Security headers on some exits only                    | ua-tracer-8mc (`f4ba76d` baseline, then `01c168d`/2932de4 at every exit)                                                                                                                        | `securityHeaders` at the `handler` wrapper (server.ts:996-1011) and in `noStore`                                                                                                 |
+| Security headers on some exits only                    | ua-tracer-8mc (`f4ba76d` baseline, then `01c168d`/2932de4 at every exit)                                                                                                                        | `securityHeaders` at the `handler` wrapper (server.ts:1004-1017) and in `noStore`                                                                                                |
 
 Still open, tracked (listed here so the gap is modelled, not rediscovered): **ua-tracer-sgz** —
 legacy records already carrying a forged verdict in KV still render "verified" until a
@@ -221,7 +223,7 @@ legacy records already carrying a forged verdict in KV still render "verified" u
 Closed after the bootstrap: **ua-tracer-uct** — a throw inside `routeHandler` used to escape as
 Deno's bare default 500, which carries none of the baseline headers. `handler` now wraps the route
 in a try/catch, substitutes a plain 500 on a throw and sets the baseline on it, and sets the
-baseline on every other exit too (server.ts:995-1011), so I9 holds for thrown requests as well.
+baseline on every other exit too (server.ts:1004-1017), so I9 holds for thrown requests as well.
 
 ## 6. Security invariants for auditors
 

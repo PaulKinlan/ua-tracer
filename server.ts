@@ -61,9 +61,11 @@ import { registerRepairCron, repairHealth } from "./crons.ts";
 
 // `::ffff:1.2.3.4` -> `1.2.3.4`, anything else unchanged. The runtime reports
 // IPv4 peers IPv4-mapped over IPv6; classifyBot applies the same normalisation
-// for its own direct callers.
+// for its own direct callers. Case-insensitive: IPv6 hex groups are case-
+// insensitive, so a header or runtime spelling `::FFFF:` is the same address
+// (ua-tracer-5k6).
 function unmapIpv4(ip: string): string {
-  return ip.replace(/^::ffff:/, "");
+  return ip.replace(/^::ffff:/i, "");
 }
 
 // The connection peer: the address the runtime accepted the TCP connection from.

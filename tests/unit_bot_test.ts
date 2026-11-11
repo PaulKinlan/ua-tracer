@@ -48,6 +48,13 @@ Deno.test("an IPv4-mapped IPv6 client IP is normalised before matching", async (
   if (v?.status !== "verified") throw new Error(JSON.stringify(v));
 });
 
+Deno.test("an uppercase IPv4-mapped IPv6 client IP is the same address (ua-tracer-5k6)", async () => {
+  // IPv6 hex groups are case-insensitive, so ::FFFF:66.249.66.7 IS ::ffff:66.249.66.7 -
+  // an address inside the seeded Googlebot range. It must not fall into the IPv6 branch.
+  const v = await classifyBot("::FFFF:66.249.66.7", "Googlebot/2.1");
+  if (v?.status !== "verified") throw new Error(JSON.stringify(v));
+});
+
 Deno.test("a plain IPv6 client IP is unverifiable, never a spoof verdict", async () => {
   // tm-bot-verdict-ipv6-false-spoof (ua-tracer-917): IPv6 ranges are not matched,
   // so the honest verdict is 'unverifiable' — 'unverified' would accuse the UA

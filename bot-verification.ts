@@ -154,7 +154,9 @@ export async function classifyBot(
   ua: string,
   deps: BotDependencies = {},
 ): Promise<BotVerification | null> {
-  const ipNorm = ip === null ? null : ip.replace(/^::ffff:/, "").trim();
+  // Case-insensitive: IPv6 hex groups are case-insensitive, so `::FFFF:` is the
+  // same mapped address (ua-tracer-5k6).
+  const ipNorm = ip === null ? null : ip.replace(/^::ffff:/i, "").trim();
   const uaLower = (ua || "").toLowerCase();
 
   for (const source of BOT_RANGE_SOURCES) {

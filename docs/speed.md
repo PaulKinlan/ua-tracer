@@ -96,7 +96,10 @@ mapping; `--dry-run` prints the resolved set):
 | `deno.json`, `tools/*`, `README.md`, `AGENTS.md`, `docs/*`, `LICENSE`, `.gitignore`, `.github/workflows/*` | `gate_mapping_test` (the bounded subset that proves the dispatcher still maps; both guard suites run on every invocation anyway)                       |
 | anything else                                                                                              | **fails closed (exit 2)**, naming the file                                                                                                             |
 
-An empty delta runs every suite: "nothing changed" must never mean "nothing verified". The mapping
+An empty delta runs every fast suite but **not** the browser journey: "nothing changed" must never
+mean "nothing verified", and no browser file can have changed in an empty delta, so a headless
+Chrome there would buy cost rather than signal (ua-tracer-09q). A change to a browser suite still
+selects it, and the full tier (`--all-suites`, what the merger runs) always includes it. The mapping
 is self-checking: `tests/gate_mapping_test.ts` walks `git ls-files` and fails if any tracked file is
 unmapped, and proves the fail-closed behaviour with a real unmapped file in the delta. It also
 asserts the full tier is a superset of every affected-tier resolution, so "full includes fast" is

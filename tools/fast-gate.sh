@@ -11,6 +11,14 @@
 # path that maps to no suite exits non-zero and names the file, and the browser
 # journey runs whenever the delta touches it.
 #
+# ONE DELIBERATE EXCEPTION (ua-tracer-09q): an EMPTY delta - a clean tree with no
+# commits ahead of the base - runs every FAST suite but not the browser journey.
+# No browser file can have changed in an empty delta, so a headless Chrome there
+# buys cost, not signal (measured ~5 s in-test, 7-11 s wall, on a path that used
+# to pay it on every clean branch). A changed browser file still maps to itself via
+# map_one, and `--all-suites` (what the full tier runs) still includes it
+# unconditionally.
+#
 # USAGE
 #   tools/fast-gate.sh                  # affected suites for the current delta
 #   tools/fast-gate.sh --all-suites     # every suite, whatever the delta (used by test:full)
@@ -183,8 +191,12 @@ resolve_delta() {
   local -a files=()
   if [[ -n "$files_out" ]]; then mapfile -t files <<<"$files_out"; fi
   if [[ ${#files[@]} -eq 0 ]]; then
-    echo "$SELF: empty delta vs $(git rev-parse --short HEAD); running every suite" >&2
-    printf '%s\n' "${ALL_SUITES[@]}"
+    # Nothing changed, so nothing can have changed in the browser tier either: run
+    # every fast suite, and leave the headless Chrome out of it (ua-tracer-09q).
+    # "Nothing changed" must still never mean "nothing verified" - the whole fast
+    # set runs; `--all-suites` is the tier that runs the browser unconditionally.
+    echo "$SELF: empty delta vs $(git rev-parse --short HEAD); running every fast suite (browser journey excluded: no browser file changed - use --all-suites for it)" >&2
+    printf '%s\n' "${FAST_SUITES[@]}"
     return 0
   fi
 

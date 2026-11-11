@@ -243,6 +243,70 @@ Deno.test("the browser journey runs for its own changes and in the full tier", a
   }
 });
 
+Deno.test("an empty delta runs every fast suite but never the browser journey", async () => {
+  // The rule (ua-tracer-09q) binds only when the tree is genuinely clean: `git status`
+  // is part of the delta, so a lane's own uncommitted files would make this resolve as
+  // an ordinary (non-empty) delta and the assertion below vacuous. A throwaway local
+  // clone gives the gate a committed, clean tree without touching this one, and it lives
+  // under the gitignored artifacts/ so this repo's status never sees it. GIT_BASE is the
+  // clone's own HEAD, i.e. the empty delta (HEAD == base, nothing modified).
+  const scratch = `${repoRoot}/artifacts/empty-delta-clone`;
+  await Deno.mkdir(`${repoRoot}/artifacts`, { recursive: true });
+  await Deno.remove(scratch, { recursive: true }).catch(() => {});
+  const git = (args: string[], cwd: string) =>
+    new Deno.Command("git", { args, cwd, stdout: "piped", stderr: "piped" }).output();
+  const clone = await git(["clone", "--quiet", "--local", repoRoot, scratch], repoRoot);
+  if (clone.code !== 0) {
+    throw new Error(
+      `could not create the scratch clone: ${new TextDecoder().decode(clone.stderr)}`,
+    );
+  }
+  try {
+    const runInClone = async (args: string[]) => {
+      const out = await new Deno.Command("bash", {
+        args: ["tools/fast-gate.sh", ...args],
+        cwd: scratch,
+        env: { GIT_BASE: "HEAD" },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      return {
+        code: out.code,
+        stdout: new TextDecoder().decode(out.stdout),
+        stderr: new TextDecoder().decode(out.stderr),
+      };
+    };
+    const empty = await runInClone(["--dry-run"]);
+    if (empty.code !== 0) {
+      throw new Error(`--dry-run on an empty delta exited ${empty.code}: ${empty.stderr}`);
+    }
+    if (!empty.stderr.includes("empty delta")) {
+      throw new Error(
+        `the empty-delta path did not run; stderr said: ${empty.stderr.slice(0, 400)}`,
+      );
+    }
+    const resolved = lines(empty.stdout);
+    if (resolved.length === 0) throw new Error("an empty delta resolved to nothing");
+    if (resolved.includes("tests/browser_journey_test.ts")) {
+      throw new Error("an empty delta must not pay for the browser journey");
+    }
+    // "Nothing changed" still verifies everything it can: the whole fast set runs.
+    const full = lines((await runInClone(["--all-suites", "--dry-run"])).stdout);
+    for (const suite of full) {
+      if (NON_FAST_SUITES.includes(suite)) continue;
+      if (!resolved.includes(suite)) {
+        throw new Error(`an empty delta skipped the fast suite ${suite}`);
+      }
+    }
+    // ...without inventing suites the full tier does not have.
+    for (const suite of resolved) {
+      if (!full.includes(suite)) throw new Error(`the empty delta ran unknown suite ${suite}`);
+    }
+  } finally {
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+  }
+});
+
 Deno.test("usage errors exit 3 and a bad base ref exits 4", async () => {
   if ((await run(["--nonsense"])).code !== 3) throw new Error("unknown flag must exit 3");
   if ((await run(["--map"])).code !== 3) throw new Error("--map without a path must exit 3");

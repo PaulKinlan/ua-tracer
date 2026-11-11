@@ -158,10 +158,28 @@ function concat(arrs: Uint8Array[]): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-// A real minimal WOFF2 font (signature wOF2), a single blank-glyph font built
-// offline with fonttools + woff2_compress. Real, parseable woff2 binary.
+// A real, decodable minimal WOFF2 font: two glyphs (.notdef and one solid
+// rectangle), a valid glyf table (66 bytes) and a cmap that maps ONLY the
+// private-use codepoint U+E000 to the rectangle. Built with fontTools
+// FontBuilder and compressed with fontTools' WOFF2 encoder; verified to LOAD in
+// Chrome (document.fonts status "loaded", FontFace.check true).
+//
+// Two properties are load-bearing and were both wrong before (ua-tracer-hik):
+//  - the glyf table must be non-empty. A font whose every glyph is empty
+//    reconstructs to a zero-length glyf table, which every OTS-based engine
+//    (Chrome, Firefox) rejects with "glyf: zero-length table" - the previous
+//    body was exactly that, so the @font-face never loaded even though the
+//    fetch was recorded.
+//  - it must NOT cover ASCII. The probe paragraph is set in this face with a
+//    Georgia fallback; a face that covered Latin would draw its own rectangle
+//    shapes over the text. With no ASCII coverage the engine falls back per
+//    character (measured: identical rendered width with and without the face in
+//    the stack), while the U+E000 mapping keeps the face genuinely usable and
+//    the cmap non-empty (a face that maps nothing can be treated as unusable).
+// tests/unit_probes_test.ts parses this body and fails if the glyf length drops
+// back to zero or the container stops being self-consistent.
 export const WOFF2_FONT = decodeBase64(
-  "d09GMgABAAAAAAEMAAoAAAAAAmgAAADFAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAABmAANAoALAsGAAE2AiQDBgQgBXIHJhvXAWCeBXY7BzUWYqInhqK5en6X4vnvL3bue3+ngo2Wlj5QmKYUcBoINTu+HpTbxBCidOWVZ0VQjq0feI6n9T9OfXidHEcUceaBnY8SWCB+0oCi5oFurL4clsRyxCxO1DnztRjkgb2yME26CQqNTQs2w8QwBPPPi00AFMSK4yIIn2N/4a/dB/xmYXBNKxB6ipyAANNaEBSAQiDRU0CsCCgXq5ZxE7tNUcrd463chs7fCfStqE+0IglyGD48mw0WyiXowMABAA==",
+  "d09GMgABAAAAAAFQAAoAAAAAAvwAAAEIAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAABmAANApESgE2AiQDBgsGAAQgBYE9BywbRgIAHgd2M9eFxTBJM3xRiIevaXt/d3NH7Yo+PpZSmnAIj1UIG4VCImQcjA86dja0LnWhnt9ldvM9gPMFadqZ9ggE9GIUxxxF+lDWP5AhbD7bsJtPfLoLMmSJyEuO+6scXaxSKJkBHh3RauX1Xq75BvC6mpCxYINysY4SB62+x5frIQAkUJAxgWlAAUmUUsaryfI+WU3gpG5u3vZWzlfwPRAIfha6sab3/0fIf/C7NvGJRzXxlRpkCYR3ueg2QH1DAABieiGQjEiQmdSBRw54ch2SyqQAA/PmZFFGhTU7NU3GHCUDu24+cN/I12qaZXnXpizZB0fgIVkyGlXVvLdN7gghSESq7gMA",
 );
 
 // A real 16x16 ICO favicon (valid image/x-icon), built offline with Pillow.

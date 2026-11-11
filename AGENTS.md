@@ -96,7 +96,10 @@ ua-tracer-qir).
 | anything else                                                                                              | **exit 2, fail closed**                                                                                     |
 
 Both guard suites (`gate_mapping_test`, `gate_config_test`) run on every invocation. An empty delta
-runs everything: "nothing changed" must never mean "nothing verified".
+runs every **fast** suite but not the browser journey (ua-tracer-09q): "nothing changed" must never
+mean "nothing verified", and no browser file can have changed in an empty delta, so a headless
+Chrome there costs ~5 s of test time for no signal. A change to a browser suite still selects it,
+and the full tier the merger runs (`--all-suites`) always includes it.
 
 ## Hermeticity (why a green gate means something)
 

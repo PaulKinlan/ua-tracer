@@ -985,3 +985,40 @@ async function trackedFiles(): Promise<string[]> {
   if (files.length < 8) throw new Error(`git ls-files '*.ts' returned ${files.length} files`);
   return files;
 }
+
+Deno.test("the on-demand production harness is in no gate tier and maps only to the guards", async () => {
+  // tools/prod-probe-loop.ts drives a real headless Chrome against the LIVE site
+  // (ua-tracer-68d/g rg). A gate that ran it would make every landing depend on
+  // production being up and would write traces into production KV, so the contract is
+  // that the tiers stay away from it and only the mapping guard is selected by its
+  // change. This is asserted because "documented as on-demand" is exactly the kind of
+  // claim that quietly stops being true.
+  const harness = "tools/prod-probe-loop.ts";
+  const mapped = await suites(["--map", harness]);
+  if (mapped.length === 0) throw new Error(`${harness} maps to nothing`);
+  for (const suite of mapped) {
+    if (!NON_FAST_SUITES.includes(suite)) {
+      throw new Error(`${harness} must not select a runnable tier suite, got ${suite}`);
+    }
+  }
+  for (const args of [["--all-suites", "--dry-run"], ["--dry-run"]]) {
+    const resolved = await suites(args);
+    if (resolved.some((s) => s.includes("prod-probe-loop"))) {
+      throw new Error(`${args.join(" ")} selected the production harness`);
+    }
+  }
+  // The two places a tier is defined beyond the map: the full-tier wrapper and the
+  // deno tasks. Neither may reach for the harness.
+  for (const file of ["tools/full-gate.sh", "deno.json"]) {
+    const text = await Deno.readTextFile(`${repoRoot}/${file}`);
+    if (text.includes("prod-probe-loop")) {
+      throw new Error(`${file} references the production harness; it must stay on demand`);
+    }
+  }
+  // ...and the map arm itself must be explicit rather than falling through to tools/*,
+  // so its status is visible to whoever reads map_one() next.
+  const gate = await Deno.readTextFile(`${repoRoot}/tools/fast-gate.sh`);
+  if (!gate.includes(`${harness})`)) {
+    throw new Error(`map_one() has no explicit arm for ${harness}`);
+  }
+});

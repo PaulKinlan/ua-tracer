@@ -21,6 +21,25 @@ touches it.
 Both tiers include `deno task check:all` (fmt + lint + typecheck). The full tier is the fast tier
 with every suite, not the affected subset, plus the browser journey.
 
+### Not in any tier: `tools/prod-probe-loop.ts`
+
+`tools/prod-probe-loop.ts` (ua-tracer-68d, promoted by ua-tracer-grg) drives one headless Chrome
+against the **live** site: it mints a trace, loads the trace page, and asserts that every probe type
+was issued by a real engine, recorded, and rendered with matching counts, plus the negative case (a
+bogus or oversized probe id must 404, add no hit, and never 5xx). It is deliberate that no tier runs
+it - a landing must not depend on production being up, and a gate must never write traces into
+production KV - so `map_one()` maps it to `gate_mapping_test` (the guards own the gate contract) and
+`tests/gate_mapping_test.ts` fails if any tier selects it.
+
+```sh
+timeout -k 20 300 deno run --allow-net --allow-env --allow-run=google-chrome --allow-read \
+  --allow-write=artifacts tools/prod-probe-loop.ts [--origin <url>]
+```
+
+Measured ~15 s wall end to end (one browser, closed in a `finally`); evidence - `summary.json` plus
+four screenshots - lands in the gitignored `artifacts/prod-probe-loop/`. Run it on demand after a
+deploy, or when a change touches the probe write path, not per landing.
+
 The deployed gate reads its commands as follows, in this order of preference (do not hand-edit the
 global file, and do not assume it is ours — it is machine-global):
 

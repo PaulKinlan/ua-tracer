@@ -147,6 +147,15 @@ map_one() {
     # this gate: the mapping guard is the bounded subset that proves the dispatcher
     # still maps and still fails closed (and the config guard runs on every
     # invocation regardless).
+    #
+    # tools/prod-probe-loop.ts is named explicitly, ahead of the tools/* arm, because
+    # it is the one tracked file here that must NEVER run in a tier: it drives a real
+    # headless Chrome against the LIVE site (public network, real traces in production
+    # KV). A change to it is verified by the guards that own the gate contract, and
+    # tests/gate_mapping_test.ts asserts no tier selects it (ua-tracer-grg).
+    tools/prod-probe-loop.ts)
+      printf '%s\n' tests/gate_mapping_test.ts
+      ;;
     deno.json | .gitignore | LICENSE | README.md | AGENTS.md | docs/* | tools/* | .github/*)
       printf '%s\n' tests/gate_mapping_test.ts
       ;;

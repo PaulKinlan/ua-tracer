@@ -1098,3 +1098,126 @@ Deno.test("the on-demand production harness is in no gate tier and maps only to 
     throw new Error(`map_one() has no explicit arm for ${harness}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// THREAT_MODEL.md's citations.
+//
+// The document's whole product is its pointers: an auditor who follows a
+// `file:line` and lands on unrelated code concludes a mitigation moved or
+// vanished. It was bootstrapped with refs that were off by 5-100 lines in ~14 of
+// 74 places (ua-tracer-pfo), which is exactly the drift nobody notices by
+// reading. So the contract it states for itself is checked here:
+//
+//  1. every `file:line` / `file:from-to` ref names a tracked file and stays
+//     inside it (a rename or a deletion cannot leave a pointer to nowhere);
+//  2. where the doc names a code symbol beside a citation, that symbol is
+//     around the cited line (+-7). Prose words are ignored, so this does not
+//     fire on English that happens to look like an identifier.
+//
+// A ref that drifts because the code moved under it fails here, which is the
+// signal to re-derive the number rather than to trust it.
+const PROSE_ACRONYMS = new Set([
+  "HTML",
+  "CSS",
+  "JSON",
+  "URL",
+  "URLS",
+  "HTTP",
+  "HTTPS",
+  "DOM",
+  "API",
+  "CSP",
+  "HEAD",
+  "POST",
+  "GET",
+]);
+
+Deno.test("THREAT_MODEL.md's refs resolve and a cited symbol is beside its line", async () => {
+  const marker = "THREAT_MODEL.md";
+  const text = await Deno.readTextFile(new URL(`../${marker}`, import.meta.url));
+  const refPattern = /([A-Za-z0-9_./-]+\.(?:ts|md|json|yml|sh|conf)):(\d+)(?:-(\d+))?/g;
+  const fileExt = /\.(ts|md|json|yml|sh|conf)$/;
+  const hexish = /^[0-9a-f]{5,40}$/;
+  const failures: string[] = [];
+  let refs = 0;
+  let anchored = 0;
+
+  // A symbol is code-shaped (camelCase, snake_case, CONSTANT, dotted) and long
+  // enough not to be English. Bead ids and hyphenated prose are excluded.
+  const symbolsIn = (s: string): string[] => {
+    const found: string[] = [];
+    for (const raw of s.match(/[A-Za-z_][A-Za-z0-9_.-]{2,}/g) ?? []) {
+      const tok = raw.replace(/^[.-]+|[.-]+$/g, "");
+      if (tok.length < 4 || fileExt.test(tok) || hexish.test(tok) || tok.includes("-")) continue;
+      // Web acronyms are prose in a threat model ("a string in HTML"), not symbols
+      // of the cited file, so they must never anchor (or fail) a citation.
+      if (PROSE_ACRONYMS.has(tok.toUpperCase())) continue;
+      // Only a code-shaped token anchors: a plain lowercase word is English here
+      // ("request headers are redacted"), so it can neither anchor nor fail a
+      // citation. The cost is that a lowercase symbol like `handler` is checked for
+      // range only; every camelCase/snake_case/CONSTANT symbol is fully checked.
+      const codeish = /[A-Z]/.test(tok.slice(1)) || /[a-z][A-Z]/.test(tok) ||
+        tok.includes("_") || (tok === tok.toUpperCase() && tok.length > 3) || tok.length >= 12;
+      if (codeish && !found.includes(tok)) found.push(tok);
+    }
+    return found;
+  };
+
+  for (const [i, line] of text.split("\n").entries()) {
+    for (const match of line.matchAll(refPattern)) {
+      const [whole, file, fromRaw, toRaw] = match;
+      const from = Number(fromRaw);
+      const to = toRaw ? Number(toRaw) : from;
+      let source: string[];
+      try {
+        source = (await Deno.readTextFile(new URL(`../${file}`, import.meta.url))).split("\n");
+      } catch {
+        failures.push(`${marker}:${i + 1} cites ${whole}, but ${file} does not exist`);
+        continue;
+      }
+      refs++;
+      if (from < 1 || to < from || to > source.length) {
+        failures.push(
+          `${marker}:${i + 1} cites ${whole}, outside ${file} (${source.length} lines)`,
+        );
+        continue;
+      }
+      // The 40 characters immediately before the ref are its own clause: what the
+      // sentence attributes to this pointer, not to the ref beside it.
+      const context = line.slice(Math.max(0, match.index - 40), match.index);
+      for (const symbol of symbolsIn(context)) {
+        // Only a symbol that really is code in this file can anchor anything;
+        // otherwise the word is English and says nothing about the pointer.
+        const occurs: number[] = [];
+        // Whole-identifier match, so `handler` is never "found" inside `routeHandler`.
+        const asCode = new RegExp(
+          `(?<![A-Za-z0-9_])${
+            symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+          }(?![A-Za-z0-9_])\\s*[(=:?.,\\]}){'"<>/]`,
+          "i",
+        );
+        source.forEach((sl, n) => {
+          if (asCode.test(sl)) occurs.push(n + 1);
+        });
+        if (occurs.length === 0) continue;
+        anchored++;
+        if (!occurs.some((n) => n >= from - 7 && n <= to + 7)) {
+          failures.push(
+            `${marker}:${i + 1} cites ${whole} for \`${symbol}\`, which is at ${
+              file.split("/").pop()
+            }:${occurs.slice(0, 3).join("/")} — re-derive the number`,
+          );
+        }
+        break;
+      }
+    }
+  }
+
+  if (refs < 50) throw new Error(`only ${refs} refs found in ${marker}; did the format change?`);
+  if (failures.length) {
+    throw new Error(`${failures.length} stale citation(s):\n${failures.join("\n")}`);
+  }
+  // Sanity: the anchor half of the check must be doing real work, not skipping
+  // every ref because the prose stopped naming symbols.
+  if (anchored < 20) throw new Error(`only ${anchored}/${refs} refs are symbol-anchored`);
+});

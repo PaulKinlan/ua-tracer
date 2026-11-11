@@ -164,7 +164,8 @@ map_one() {
     tools/prod-probe-loop.ts)
       printf '%s\n' tests/gate_mapping_test.ts
       ;;
-    deno.json | .gitignore | LICENSE | README.md | AGENTS.md | docs/* | tools/* | .github/*)
+    deno.json | .gitignore | LICENSE | README.md | AGENTS.md | THREAT_MODEL.md | docs/* | tools/* | \
+      .github/*)
       printf '%s\n' tests/gate_mapping_test.ts
       ;;
     *)

@@ -779,6 +779,42 @@ async function handleTrace(id: string): Promise<Response> {
 // Router
 // ---------------------------------------------------------------------------
 
+// Every route below SERVES a resource; none of them negotiate a method. So the two
+// questions a client can ask about a method are answered here, centrally, before
+// dispatch (ua-tracer-9jp):
+//  - OPTIONS: 204 + `Allow`, instead of falling into the handler and being answered
+//    with the full GET body and no Allow header (measured live on build qvgw9wsbq2hg:
+//    OPTIONS /r/{id}/main.js returned 3889 B of JS, OPTIONS /trace/{id} returned the
+//    11.8 kB missing-trace page). The answer is the same whether or not the id exists,
+//    so it cannot be used to enumerate traces.
+//  - anything the path does not serve: 405 + the same `Allow`, instead of whatever
+//    that handler happened to do with it.
+//
+// Deliberate exceptions, not oversights:
+//  - `/api/health` answers every method with the same JSON. It is the uptime surface
+//    and is answered ABOVE this gate (and above the canonical redirect) so a monitor
+//    never has to know which verb or host this build prefers.
+//  - probe assets answer POST as well as GET/HEAD: the timing and CSP/report beacons
+//    POST their payload to /r/{id}/{secret}/timing and .../csp-report, and a hit records
+//    the method verbatim, so a POST to another asset is still a real fetch of it.
+//
+// This list mirrors routeHandler's path shapes and must move with it. Nothing derives
+// it automatically, so tests/http_test.ts pins one row per route shape (including the
+// routes' PATHS, not just their methods).
+const READ_METHODS = ["GET", "HEAD", "OPTIONS"];
+const PROBE_METHODS = ["GET", "HEAD", "POST", "OPTIONS"];
+
+function allowedMethodsFor(path: string): string[] | null {
+  if (path === "/" || path === "/favicon.ico") return READ_METHODS;
+  if (path === "/traces" || path === "/traces/") return READ_METHODS;
+  if (/^\/trace\/[^/]+$/.test(path)) return READ_METHODS;
+  if (/^\/r\/[^/]+\/.+/.test(path)) return PROBE_METHODS;
+  if (path === "/sitemap.xml" || path === "/sitemap_index.xml") return READ_METHODS;
+  // Recognition only: the origin argument shapes the bodies, which are discarded here.
+  if (wellKnownResponse(path, "") !== null) return READ_METHODS;
+  return null;
+}
+
 // Unsolicited probe paths a UA may fetch without us ever linking them. Returns
 // a sensible response if `path` is recognised, else null.
 function wellKnownResponse(path: string, origin: string): Response | null {
@@ -930,6 +966,17 @@ async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise
     return new Response(null, {
       status: 301,
       headers: { location: `${CANONICAL_ORIGIN}${path}${url.search}` },
+    });
+  }
+
+  // Method contract (ua-tracer-9jp). Placed after the canonical redirect and after the
+  // health branch, so both keep their documented behaviour for every method.
+  const allowedMethods = allowedMethodsFor(path);
+  if (allowedMethods && (req.method === "OPTIONS" || !allowedMethods.includes(req.method))) {
+    const isOptions = req.method === "OPTIONS";
+    return new Response(null, {
+      status: isOptions ? 204 : 405,
+      headers: noStore({ allow: allowedMethods.join(", ") }),
     });
   }
 

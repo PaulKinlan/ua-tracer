@@ -621,12 +621,102 @@ Deno.test("an oversized /trace/{id} 404s instead of throwing on an oversized KV 
   if (await countPrefix(["trace"]) !== 0) throw new Error("a rejected trace id wrote to KV");
 });
 
-Deno.test("a non-GET/HEAD request to / is not treated as a homepage hit", async () => {
+Deno.test("a method a read-only route does not serve is 405 with Allow, and writes nothing", async () => {
   await clearKv();
-  const res = await handler(req("/", { method: "POST" }));
-  if (res.status !== 404) throw new Error(`POST / -> ${res.status}`);
+  const { id, secret } = await mint();
+  const tracesBefore = await countPrefix(["trace"]);
+  const hitsBefore = (await hitsOf(id)).length;
+  const cases: Array<[string, string, string]> = [
+    ["/", "POST", "GET, HEAD, OPTIONS"],
+    [`/trace/${id}`, "POST", "GET, HEAD, OPTIONS"],
+    ["/robots.txt", "DELETE", "GET, HEAD, OPTIONS"],
+    [`/r/${id}/${secret}/main.js`, "PUT", "GET, HEAD, POST, OPTIONS"],
+  ];
+  for (const [path, method, allow] of cases) {
+    const res = await handler(req(path, { method }));
+    if (res.status !== 405) throw new Error(`${method} ${path} -> ${res.status}, want 405`);
+    if (res.headers.get("allow") !== allow) {
+      throw new Error(`${method} ${path}: allow=${res.headers.get("allow")}`);
+    }
+    if ((await res.text()) !== "") throw new Error(`${method} ${path} returned a body`);
+  }
+  // A refused method is not a visit: it must not mint a trace or record a hit.
+  if (await countPrefix(["trace"]) !== tracesBefore) {
+    throw new Error("a refused method minted a trace");
+  }
+  if ((await hitsOf(id)).length !== hitsBefore) throw new Error("a refused method recorded a hit");
+});
+
+Deno.test("OPTIONS states what each route serves and serves no body or hit", async () => {
+  await clearKv();
+  const { id, secret } = await mint();
+  const hitsBefore = (await hitsOf(id)).length;
+  const read = "GET, HEAD, OPTIONS";
+  const cases: Array<[string, string]> = [
+    ["/", read],
+    ["/traces", read],
+    ["/traces/", read],
+    [`/trace/${id}`, read],
+    ["/sitemap.xml", read],
+    ["/robots.txt", read],
+    ["/.well-known/security.txt", read],
+    [`/r/${id}/${secret}/main.js`, "GET, HEAD, POST, OPTIONS"],
+    [`/r/${id}/main.js`, "GET, HEAD, POST, OPTIONS"],
+  ];
+  for (const [path, allow] of cases) {
+    const res = await handler(req(path, { method: "OPTIONS" }));
+    if (res.status !== 204) throw new Error(`OPTIONS ${path} -> ${res.status}, want 204`);
+    if (res.headers.get("allow") !== allow) {
+      throw new Error(`OPTIONS ${path}: allow=${res.headers.get("allow")}, want ${allow}`);
+    }
+    if ((await res.text()) !== "") throw new Error(`OPTIONS ${path} returned a body`);
+  }
+  // The capability answer must not depend on whether the id exists, or it becomes an
+  // enumeration oracle; and it must not be logged as a probe or a hit.
+  const missing = await handler(req("/trace/thisIdDoesNotExist", { method: "OPTIONS" }));
+  if (missing.status !== 204 || missing.headers.get("allow") !== read) {
+    throw new Error(`OPTIONS on a missing trace -> ${missing.status}`);
+  }
+  await missing.body?.cancel();
+  if ((await hitsOf(id)).length !== hitsBefore) throw new Error("OPTIONS recorded a hit");
+  if (await countPrefix(["probe"]) !== 0) throw new Error("OPTIONS recorded a probe");
+});
+
+Deno.test("OPTIONS on an unknown path is still a 404 and claims no capability", async () => {
+  const res = await handler(req("/no-such-route", { method: "OPTIONS" }));
+  if (res.status !== 404) throw new Error(`OPTIONS /no-such-route -> ${res.status}, want 404`);
+  if (res.headers.get("allow") !== null) {
+    throw new Error(`404 claimed Allow: ${res.headers.get("allow")}`);
+  }
   await res.text();
-  if (await countPrefix(["trace"]) !== 0) throw new Error("POST / minted a trace");
+});
+
+Deno.test("the 204 and 405 exits carry the full security baseline", async () => {
+  const expected = {
+    "content-security-policy": "default-src 'self'",
+    "strict-transport-security": "max-age=63072000; includeSubDomains",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "x-frame-options": "SAMEORIGIN",
+    "permissions-policy": "camera=()",
+  };
+  const exits: Array<[string, string, number]> = [
+    ["/robots.txt", "OPTIONS", 204],
+    ["/robots.txt", "PUT", 405],
+  ];
+  for (const [path, method, status] of exits) {
+    const res = await handler(req(path, { method }));
+    if (res.status !== status) throw new Error(`${method} ${path} -> ${res.status}`);
+    for (const [name, value] of Object.entries(expected)) {
+      if (!res.headers.get(name)?.includes(value)) {
+        throw new Error(`${method} ${path}: missing ${name}`);
+      }
+    }
+    if (!res.headers.get("cache-control")?.includes("no-store")) {
+      throw new Error(`${method} ${path}: not no-store`);
+    }
+    await res.body?.cancel();
+  }
 });
 
 Deno.test("a CSP / Reporting-API report POST is captured on the hit and acked with 204", async () => {

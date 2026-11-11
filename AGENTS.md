@@ -181,6 +181,16 @@ Two things a lane must not break:
   reserved name is written in any other non-test module, and `tests/kv_behaviour_test.ts` drives a
   direct writer to prove the write boundary strips a forged one.
 - `HEAD` must return the same headers as `GET` with an empty body.
+- **Method contract (ua-tracer-9jp):** the route handlers serve a resource, they do not negotiate a
+  method, so `allowedMethodsFor()` in `server.ts` answers that question centrally _before_ dispatch:
+  `OPTIONS` gets `204` + an `Allow` header (the same answer whether or not the id exists, so it is
+  not an enumeration oracle) and any other method a path does not serve gets `405` + the same
+  `Allow` — without reaching the handler, and therefore without minting a trace or recording a hit.
+  Probe assets allow `POST` too (the timing and CSP/report beacons post their payload there, and a
+  hit records the method verbatim, so a POST to another asset is still a real fetch of it). Two
+  deliberate exceptions: `/api/health` answers every method with the same JSON and is answered above
+  the gate, and an unknown path stays a `404` that claims no `Allow`. That list mirrors the router's
+  path shapes by hand, so `tests/http_test.ts` pins a row per route shape; a new route adds its row.
 
 ## Working on this repo (fleet lanes)
 

@@ -17,6 +17,13 @@ export async function getKv(): Promise<Deno.Kv> {
   return _kv;
 }
 
+/** Forget the cached handle. Test-only seam: testenv closes the in-memory KV to
+    force a route-level throw, and the next getKv() must reopen rather than hand
+    the closed handle to the rest of the suite. Same shape as resetBotRangeCache. */
+export function resetKvForTest(): void {
+  _kv = null;
+}
+
 // Public traces must never retain request credentials. Keep ordinary diagnostic
 // headers; mask standard credential names and common custom auth/token/key forms.
 const SENSITIVE_HEADER_NAME =

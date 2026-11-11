@@ -17,12 +17,25 @@ Deno.env.set("DENO_KV_URL", ":memory:");
 // A hosted-KV token would only add a way to get this wrong.
 Deno.env.delete("DENO_KV_ACCESS_TOKEN");
 
-import { getKv } from "../storage.ts";
+import { getKv, resetKvForTest } from "../storage.ts";
 import { resetBotRangeCache } from "../bot-verification.ts";
 
 /** The process-local in-memory KV this suite file is using. */
 export function testKv(): Promise<Deno.Kv> {
   return getKv();
+}
+
+/** Run `fn` with the cached KV handle closed, so any route-level KV operation
+    throws the way a dead KV would in production; the handle cache is then reset
+    so the rest of the suite reopens a fresh in-memory KV and is unaffected. */
+export async function withClosedKv<T>(fn: () => Promise<T>): Promise<T> {
+  const kv = await getKv();
+  kv.close();
+  try {
+    return await fn();
+  } finally {
+    resetKvForTest();
+  }
 }
 
 /** Remove every KV key and the bot classifier's in-memory range cache. */

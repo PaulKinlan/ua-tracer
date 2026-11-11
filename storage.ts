@@ -277,7 +277,7 @@ export const MAX_RECORD_BYTES = 48 * 1024;
 // the identity-only bound commitHit already applies to hit records.
 export const MAX_TRACE_UA_CHARS = 200;
 export const MAX_TRACE_IP_CHARS = 64;
-const MAX_TRACE_METHOD_CHARS = 16;
+export const MAX_TRACE_METHOD_CHARS = 16;
 
 function encodedSize(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length;
@@ -385,8 +385,22 @@ function hasHugeHeader(rec: HitRecord): boolean {
 }
 
 function boundRecord(rec: HitRecord, warn: (line: string) => void): HitRecord {
-  // Redact before every storage path, including the oversized-record fallback.
-  rec = { ...rec, headers: redactHeaders(rec.headers) };
+  // Bound identity fields before the cheap early-out as well as the fallback:
+  // a claimed forwarding address can be much larger than KV's value cap even
+  // when there is no body or large header (ua-tracer-6zl).
+  if (
+    rec.ua.length > MAX_TRACE_UA_CHARS || rec.ip.length > MAX_TRACE_IP_CHARS ||
+    rec.method.length > MAX_TRACE_METHOD_CHARS
+  ) {
+    warn(`[hit] trace ${rec.id} request identity truncated to fit KV`);
+  }
+  rec = {
+    ...rec,
+    ua: rec.ua.slice(0, MAX_TRACE_UA_CHARS),
+    ip: rec.ip.slice(0, MAX_TRACE_IP_CHARS),
+    method: rec.method.slice(0, MAX_TRACE_METHOD_CHARS),
+    headers: redactHeaders(rec.headers),
+  };
   // Cheap first: only hits carrying a client-supplied payload can be large, so the
   // common probe path pays nothing. A long HEADER value is the other way in, and it is
   // the one KV rejects against its own cap without this function ever being asked
@@ -411,7 +425,7 @@ function boundRecord(rec: HitRecord, warn: (line: string) => void): HitRecord {
       id: rec.id,
       kind: rec.kind,
       ts: rec.ts,
-      ua: rec.ua.slice(0, 200),
+      ua: rec.ua,
       ip: rec.ip,
       method: rec.method,
       headers: { [EVIDENCE_KEYS.payloadTruncated]: marker },
@@ -466,9 +480,9 @@ export async function commitHit(
     id: rec.id,
     kind: rec.kind,
     ts: rec.ts,
-    ua: rec.ua.slice(0, 200),
-    ip: rec.ip,
-    method: rec.method,
+    ua: rec.ua.slice(0, MAX_TRACE_UA_CHARS),
+    ip: rec.ip.slice(0, MAX_TRACE_IP_CHARS),
+    method: rec.method.slice(0, MAX_TRACE_METHOD_CHARS),
     headers: {},
   };
 
@@ -668,7 +682,7 @@ export async function logHit(rec: HitRecord, evidence: HitEvidence = {}): Promis
   }
 
   console.log(
-    `[hit] trace=${rec.id} kind=${rec.kind} ip=${rec.ip} ua="${rec.ua.slice(0, 80)}"`,
+    `[hit] trace=${rec.id} kind=${rec.kind} ip=${rec.ip.slice(0, 80)} ua="${rec.ua.slice(0, 80)}"`,
   );
 }
 

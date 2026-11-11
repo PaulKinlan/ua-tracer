@@ -30,6 +30,7 @@ import {
   MAX_PROBE_UA_CHARS,
   MAX_RECORD_BYTES,
   MAX_TRACE_IP_CHARS,
+  MAX_TRACE_METHOD_CHARS,
   MAX_TRACE_UA_CHARS,
 } from "../storage.ts";
 import { runBackfill } from "../backfill.ts";
@@ -597,6 +598,36 @@ Deno.test("a header over the value cap is trimmed before the write, not rejected
   }
 });
 
+Deno.test("an oversized identity is bounded before the hit's cheap early-out", async () => {
+  await clearKv();
+  const id = "t6zl1";
+  const kv = await seedStats(id, TRACE_TS);
+  // No timing, report body or huge header: this record used to return early
+  // without ever checking the attacker-shaped ip and method.
+  const rec: HitRecord = {
+    ...hitRec(id, "css", TRACE_TS + 1),
+    ip: "f".repeat(2000),
+    method: "M".repeat(2000),
+  };
+  const warnings: string[] = [];
+  const key: Deno.KvKey = ["hit", id, "bounded-identity"];
+  const outcome = await commitHit(kv, rec, key, traceRow(id, TRACE_TS), {
+    warn: (line) => warnings.push(line),
+  });
+  if (outcome !== "committed") throw new Error(`outcome ${outcome}`);
+  const stored = (await kv.get<HitRecord>(key)).value;
+  if (
+    stored?.ip !== "f".repeat(MAX_TRACE_IP_CHARS) ||
+    stored.method !== "M".repeat(MAX_TRACE_METHOD_CHARS)
+  ) {
+    throw new Error("the hit kept an unbounded identity");
+  }
+  if ((await stats(id, TRACE_TS))?.assetCount !== 1) throw new Error("the hit was not counted");
+  if (!warnings.some((line) => line.includes("identity truncated"))) {
+    throw new Error("the identity truncation was silent");
+  }
+});
+
 // ---- ua-tracer-6sn: a hit's key is an identity, not a timestamp ----
 // The key's timestamp segment orders hits within a trace, but two hits for one trace can
 // sample the same microsecond. Before this the later write simply overwrote the earlier
@@ -928,20 +959,88 @@ Deno.test("a seed record still over budget after value caps falls back to metada
   }
 });
 
-Deno.test("an oversized claimed x-forwarded-for is bounded in the seed record", async () => {
+Deno.test("an oversized claimed x-forwarded-for preserves both seed and homepage root hit", async () => {
   await clearKv();
   const kv = await testKv();
   // No connInfo: the handler falls back to the claimed forwarding header, which is
-  // client-controlled text of arbitrary length.
-  const response = await handler(
-    req("/", { headers: { "user-agent": UA, "x-forwarded-for": "f".repeat(70_000) } }),
-  );
+  // client-controlled text of arbitrary length. Capture the actual log output.
+  const warnings: string[] = [];
+  const logs: string[] = [];
+  const originalWarn = console.warn;
+  const originalLog = console.log;
+  let response: Response;
+  try {
+    console.warn = (message: string) => warnings.push(message);
+    console.log = (message: string) => logs.push(message);
+    response = await handler(
+      req("/", { headers: { "user-agent": UA, "x-forwarded-for": "f".repeat(70_000) } }),
+    );
+  } finally {
+    console.warn = originalWarn;
+    console.log = originalLog;
+  }
   if (response.status !== 200) throw new Error(`claimed-xff homepage returned ${response.status}`);
   const { id } = traceBaseFromHtml(await response.text());
   const rec = (await kv.get<TraceRecord>(["trace", id])).value;
   if (!rec) throw new Error("the trace was not stored");
   if (rec.ip !== "f".repeat(MAX_TRACE_IP_CHARS)) {
     throw new Error(`claimed ip was not bounded: ${rec.ip.length} chars`);
+  }
+  const root = (await listHits(id)).filter((h) => h.kind === "homepage");
+  if (root.length !== 1 || root[0].ip !== rec.ip) {
+    throw new Error(`root hit was lost or unbounded: ${root.length} hits`);
+  }
+  if (!warnings.some((w) => w.includes("identity truncated"))) {
+    throw new Error(`the identity truncation was silent: ${JSON.stringify(warnings)}`);
+  }
+  if (warnings.some((w) => w.startsWith("[homepage]"))) {
+    throw new Error(
+      `the successfully persisted seed/root emitted a homepage failure: ${
+        JSON.stringify(warnings)
+      }`,
+    );
+  }
+  if (logs.length < 3 || logs.some((line) => line.length > 300)) {
+    throw new Error(
+      `claimed ip escaped into request/hit/homepage logs: ${logs.map((l) => l.length)}`,
+    );
+  }
+});
+
+Deno.test("an oversized claimed ip on a probe preserves the hit and its count", async () => {
+  await clearKv();
+  const { id, secret } = await mintOnce();
+  const originalLog = console.log;
+  const logs: string[] = [];
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  let response: Response;
+  try {
+    console.log = (message: string) => logs.push(message);
+    console.warn = (message: string) => warnings.push(message);
+    response = await handler(
+      req(`/r/${id}/${secret}/style.css`, {
+        headers: { "user-agent": UA, "x-forwarded-for": "f".repeat(70_000) },
+      }),
+    );
+  } finally {
+    console.log = originalLog;
+    console.warn = originalWarn;
+  }
+  if (response.status !== 200) throw new Error(`claimed-xff probe returned ${response.status}`);
+  const hits = (await listHits(id)).filter((h) => h.kind === "css");
+  if (hits.length !== 1 || hits[0].ip !== "f".repeat(MAX_TRACE_IP_CHARS)) {
+    throw new Error(`css hit was lost or unbounded: ${hits.length} hits`);
+  }
+  const trace = (await (await testKv()).get<TraceRecord>(["trace", id])).value;
+  if (!trace) throw new Error("the seed was lost");
+  const snapshot = (await (await testKv()).get<TraceStats>(recentIndexKey(trace.ts, id))).value;
+  if (snapshot?.assetCount !== 1) throw new Error("the css hit was not counted");
+  if (warnings.some((w) => w.includes("probe is lost"))) {
+    throw new Error(`hit was wrongly reported lost: ${JSON.stringify(warnings)}`);
+  }
+  if (logs.length < 2 || logs.some((line) => line.length > 300)) {
+    throw new Error(`claimed ip escaped into probe logs: ${logs.map((l) => l.length)}`);
   }
 });
 

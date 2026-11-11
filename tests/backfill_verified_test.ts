@@ -231,6 +231,55 @@ Deno.test("a verdict is never minted from an address the client wrote", async ()
   if (second.tally["verified Googlebot"] !== 1) throw new Error(JSON.stringify(second.tally));
 });
 
+Deno.test("the persisted note is true for a trace with no address or a claimed IPv6 header (ua-tracer-505)", async () => {
+  await clearKv();
+  const kv = await testKv();
+  await seedBotRanges({ "Googlebot": ["66.249.64.0/19"] });
+
+  // No address evidence at all: clientIp()'s sentinel, only a user-agent header.
+  const noAddr = trace("noAddr", GOOGLEBOT_UA, "unknown");
+  // An IPv6 address the CLIENT wrote: the claim arrives in a forwarding header.
+  const fwd6 = traceFromHeader("fwd6", GOOGLEBOT_UA, "2001:db8::5", "x-forwarded-for", TS + 1);
+  // Control: a genuine IPv6 PEER (no forwarding header) keeps the address-family note.
+  const peer6 = trace("peer6", GOOGLEBOT_UA, "2001:4860:4801:1100::1", TS + 2);
+
+  for (const t of [noAddr, fwd6, peer6]) await seed(kv, t, true);
+
+  const result = await runBackfillVerified(kv);
+  if (result.unprovenanced !== 2) throw new Error(`unprovenanced ${result.unprovenanced}`);
+
+  const noteOf = async (id: string) => (await kv.get<TraceRecord>(["trace", id])).value?.verified;
+  const noAddrV = await noteOf("noAddr");
+  if (
+    noAddrV?.status !== "unverifiable" ||
+    !noAddrV.note.includes("no client address was recorded")
+  ) {
+    throw new Error(`noAddr: ${JSON.stringify(noAddrV)}`);
+  }
+  const fwd6V = await noteOf("fwd6");
+  if (
+    fwd6V?.status !== "unverifiable" ||
+    !fwd6V.note.includes("came from a forwarding header, which the client writes")
+  ) {
+    throw new Error(`fwd6: ${JSON.stringify(fwd6V)}`);
+  }
+  for (const [id, v] of [["noAddr", noAddrV], ["fwd6", fwd6V]] as const) {
+    if (v?.note.includes("IPv6")) {
+      throw new Error(`${id}: the false IPv6 note persisted: ${v?.note}`);
+    }
+  }
+  // The peer trace's IPv6 note is TRUE and must survive the provenance guard.
+  const peer6V = await noteOf("peer6");
+  if (peer6V?.status !== "unverifiable" || !peer6V.note.includes("IPv6")) {
+    throw new Error(`peer6: ${JSON.stringify(peer6V)}`);
+  }
+  // The notes reach the pages through the snapshots, so they must be mirrored too.
+  const fwd6Snap = (await kv.get<TraceStats>(recentIndexKey(fwd6.ts, fwd6.id))).value;
+  if (!fwd6Snap?.verified?.note.includes("forwarding header")) {
+    throw new Error(`fwd6 snapshot: ${JSON.stringify(fwd6Snap?.verified)}`);
+  }
+});
+
 Deno.test("backfill-verified skips malformed trace entries", async () => {
   await clearKv();
   const kv = await testKv();

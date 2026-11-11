@@ -170,7 +170,7 @@ export async function classifyBot(
         };
       }
       const ipInt = ipv4ToInt(ipNorm);
-      if (ipInt === null) {
+      if (ipInt === null && ipNorm.includes(":")) {
         // The peer is a valid address this checker cannot judge: a plain IPv6
         // address (the IPv4-mapped ::ffff: form is normalised above). Only IPv4
         // CIDR matching is implemented and some operators publish IPv6 ranges we
@@ -178,6 +178,12 @@ export async function classifyBot(
         // spoofing an address we never checked (tm-bot-verdict-ipv6-false-spoof,
         // ua-tracer-917). Like the no-address case, no range fetch either: the
         // answer cannot depend on the ranges.
+        //
+        // Keyed on the address FAMILY (":") and not merely on ipv4ToInt failing:
+        // a stored record can carry the "unknown" sentinel or no address at all,
+        // and labelling those "IPv6" persists a false note (ua-tracer-505). Such
+        // values fall through to the range check below, where they simply cannot
+        // match, and the backfill's provenance guard rewrites the note.
         return {
           bot: source.name,
           status: "unverifiable",
@@ -192,7 +198,9 @@ export async function classifyBot(
           note: `${source.name} published ranges temporarily unavailable`,
         };
       }
-      const inRange = ranges.some((r) => r.includes(".") && cidrContains4(r, ipInt));
+      // ipInt is null for the fall-through values above ("unknown", ""): no match.
+      const inRange = ipInt !== null &&
+        ranges.some((r) => r.includes(".") && cidrContains4(r, ipInt));
       return {
         bot: source.name,
         status: inRange ? "verified" : "unverified",

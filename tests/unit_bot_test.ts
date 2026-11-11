@@ -65,6 +65,19 @@ Deno.test("a plain IPv6 client IP is unverifiable, never a spoof verdict", async
   }
 });
 
+Deno.test("a non-address string is not labelled IPv6 (ua-tracer-505)", async () => {
+  // The IPv6 branch is keyed on the address family, not on ipv4ToInt failing: a stored
+  // record can carry clientIp()'s "unknown" sentinel or no address at all, and those are
+  // not IPv6 addresses. They fall through to the range check and cannot match it.
+  for (const notAnAddress of ["unknown", ""]) {
+    const v = await classifyBot(notAnAddress, "Googlebot/2.1");
+    if (v?.status !== "unverified") throw new Error(JSON.stringify(v));
+    if (v.note.includes("IPv6")) {
+      throw new Error(`${JSON.stringify(notAnAddress)} was labelled IPv6: ${v.note}`);
+    }
+  }
+});
+
 Deno.test("UA matching is case-insensitive", async () => {
   const a = await classifyBot("40.77.167.9", "Mozilla/5.0 (compatible; Bingbot/2.0)");
   const b = await classifyBot("40.77.167.9", "Mozilla/5.0 (compatible; bingbot/2.0)");

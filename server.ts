@@ -102,12 +102,9 @@ export function clientIp(req: Request, info?: Deno.ServeHandlerInfo): string {
 // forgets this still cannot store a client-supplied annotation as evidence
 // (ua-tracer-0l9, ua-tracer-egg).
 
-// Common HTTP headers for responses from the route handlers.
-function noStore(headers: HeadersInit = {}): Headers {
-  const h = new Headers(headers);
-  // Defeat caching so crawlers re-fetch and we always log.
-  h.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
-  h.set("pragma", "no-cache");
+// Apply the defensive baseline at the handler exit as well as in noStore():
+// error and utility responses do not necessarily need no-cache semantics.
+function securityHeaders(h: Headers): Headers {
   // Baseline defensive security headers applied to every response. These do
   // not interfere with the trace/probe logic (assets are first-party, inline
   // <style> is permitted by style-src 'unsafe-inline'). An enforced CSP here
@@ -130,6 +127,15 @@ function noStore(headers: HeadersInit = {}): Headers {
     "camera=(), microphone=(), geolocation=(), interest-cohort=()",
   );
   return h;
+}
+
+// Common HTTP headers for responses from the route handlers.
+function noStore(headers: HeadersInit = {}): Headers {
+  const h = new Headers(headers);
+  // Defeat caching so crawlers re-fetch and we always log.
+  h.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
+  h.set("pragma", "no-cache");
+  return securityHeaders(h);
 }
 
 // --- bounding the probe REQUEST BODY (ua-tracer-0ms, narrowed scope) -------------
@@ -988,6 +994,7 @@ async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise
 // gets the full set of response headers) and then drop the body.
 export async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
   const res = await routeHandler(req, info);
+  securityHeaders(res.headers);
   if (req.method === "HEAD") {
     return new Response(null, { status: res.status, headers: res.headers });
   }

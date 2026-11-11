@@ -15,8 +15,10 @@
 
 const repoRoot = Deno.realPathSync(new URL("..", import.meta.url));
 
-// The three suites that are not part of the affected (fast) tier: the gate guards run on every
-// invocation whatever the delta, and the browser journey is full-only.
+// The suites that are never part of the affected (fast) subset: the gate guards run on every
+// invocation whatever the delta, and the browser journey runs only when the delta itself touches a
+// browser file (its own mapping arm), or in the full tier --all-suites (ua-tracer-09q: an empty
+// delta leaves it out too).
 const NON_FAST_SUITES = [
   "tests/gate_mapping_test.ts",
   "tests/gate_config_test.ts",
@@ -219,7 +221,7 @@ Deno.test("the full tier is a superset of the affected tier (full includes fast)
   }).output();
   for (const file of lines(new TextDecoder().decode(tracked.stdout))) {
     const r = await run(["--map", file]);
-    if (r.code !== 0) continue; // unmapped or full-only; covered by the first test
+    if (r.code !== 0) continue; // unmapped: covered by the first test
     for (const suite of lines(r.stdout)) {
       if (!full.has(suite)) {
         throw new Error(`full tier omits ${suite}, which ${file} selects`);

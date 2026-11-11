@@ -98,7 +98,7 @@ VM).
 | `tests/deploy_check_test.ts`      | `deploy-check.ts`: the four readings of a health payload (build present / `null` / absent / unreadable), the sampling loop's evidence lines and exit codes, and the argument bounds - driven through an injected `fetch`, so it opens no socket |
 | `tests/gate_mapping_test.ts`      | the dispatcher: every tracked file is mapped, an unknown path fails closed, a real delta resolves through `git diff`, the full tier includes the fast suites                                                                                    |
 | `tests/gate_config_test.ts`       | `tools/check.conf` + `tools/check-cmd.sh`: the named tasks exist, `--install` reproduces the tracked values, a corrupt per-VM file is replaced rather than sourced, the budgets stay inside fleet R1/R2                                         |
-| `tests/browser_journey_test.ts`   | **full tier only** — a real headless Chrome loads the minted page and the server records the CSS/JS/module/iframe/timing hits                                                                                                                   |
+| `tests/browser_journey_test.ts`   | **full tier, or a delta touching the file** — a real headless Chrome loads the minted page and the server records the CSS/JS/module/iframe/timing hits                                                                                          |
 
 ## Affected-path mapping
 

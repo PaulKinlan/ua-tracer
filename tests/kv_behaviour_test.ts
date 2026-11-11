@@ -30,6 +30,7 @@ import {
   MAX_PROBE_UA_CHARS,
   MAX_RECORD_BYTES,
   MAX_TRACE_IP_CHARS,
+  MAX_TRACE_METHOD_CHARS,
   MAX_TRACE_UA_CHARS,
 } from "../storage.ts";
 import { runBackfill } from "../backfill.ts";
@@ -615,7 +616,10 @@ Deno.test("an oversized identity is bounded before the hit's cheap early-out", a
   });
   if (outcome !== "committed") throw new Error(`outcome ${outcome}`);
   const stored = (await kv.get<HitRecord>(key)).value;
-  if (stored?.ip !== "f".repeat(MAX_TRACE_IP_CHARS) || stored.method !== "M".repeat(16)) {
+  if (
+    stored?.ip !== "f".repeat(MAX_TRACE_IP_CHARS) ||
+    stored.method !== "M".repeat(MAX_TRACE_METHOD_CHARS)
+  ) {
     throw new Error("the hit kept an unbounded identity");
   }
   if ((await stats(id, TRACE_TS))?.assetCount !== 1) throw new Error("the hit was not counted");
@@ -959,14 +963,15 @@ Deno.test("an oversized claimed x-forwarded-for preserves both seed and homepage
   await clearKv();
   const kv = await testKv();
   // No connInfo: the handler falls back to the claimed forwarding header, which is
-  // client-controlled text of arbitrary length. Suppress its existing request log.
+  // client-controlled text of arbitrary length. Capture the actual log output.
   const warnings: string[] = [];
+  const logs: string[] = [];
   const originalWarn = console.warn;
   const originalLog = console.log;
   let response: Response;
   try {
     console.warn = (message: string) => warnings.push(message);
-    console.log = () => {};
+    console.log = (message: string) => logs.push(message);
     response = await handler(
       req("/", { headers: { "user-agent": UA, "x-forwarded-for": "f".repeat(70_000) } }),
     );
@@ -985,8 +990,20 @@ Deno.test("an oversized claimed x-forwarded-for preserves both seed and homepage
   if (root.length !== 1 || root[0].ip !== rec.ip) {
     throw new Error(`root hit was lost or unbounded: ${root.length} hits`);
   }
-  if (warnings.some((w) => w.includes("failed to seed") || w.includes("without a stored trace"))) {
-    throw new Error(`false missing-seed warning: ${JSON.stringify(warnings)}`);
+  if (!warnings.some((w) => w.includes("identity truncated"))) {
+    throw new Error(`the identity truncation was silent: ${JSON.stringify(warnings)}`);
+  }
+  if (warnings.some((w) => w.startsWith("[homepage]"))) {
+    throw new Error(
+      `the successfully persisted seed/root emitted a homepage failure: ${
+        JSON.stringify(warnings)
+      }`,
+    );
+  }
+  if (logs.length < 3 || logs.some((line) => line.length > 300)) {
+    throw new Error(
+      `claimed ip escaped into request/hit/homepage logs: ${logs.map((l) => l.length)}`,
+    );
   }
 });
 
@@ -994,11 +1011,12 @@ Deno.test("an oversized claimed ip on a probe preserves the hit and its count", 
   await clearKv();
   const { id, secret } = await mintOnce();
   const originalLog = console.log;
+  const logs: string[] = [];
   const warnings: string[] = [];
   const originalWarn = console.warn;
   let response: Response;
   try {
-    console.log = () => {};
+    console.log = (message: string) => logs.push(message);
     console.warn = (message: string) => warnings.push(message);
     response = await handler(
       req(`/r/${id}/${secret}/style.css`, {
@@ -1020,6 +1038,9 @@ Deno.test("an oversized claimed ip on a probe preserves the hit and its count", 
   if (snapshot?.assetCount !== 1) throw new Error("the css hit was not counted");
   if (warnings.some((w) => w.includes("probe is lost"))) {
     throw new Error(`hit was wrongly reported lost: ${JSON.stringify(warnings)}`);
+  }
+  if (logs.length < 2 || logs.some((line) => line.length > 300)) {
+    throw new Error(`claimed ip escaped into probe logs: ${logs.map((l) => l.length)}`);
   }
 });
 

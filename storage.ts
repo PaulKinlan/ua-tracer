@@ -277,7 +277,7 @@ export const MAX_RECORD_BYTES = 48 * 1024;
 // the identity-only bound commitHit already applies to hit records.
 export const MAX_TRACE_UA_CHARS = 200;
 export const MAX_TRACE_IP_CHARS = 64;
-const MAX_TRACE_METHOD_CHARS = 16;
+export const MAX_TRACE_METHOD_CHARS = 16;
 
 function encodedSize(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length;
@@ -682,7 +682,7 @@ export async function logHit(rec: HitRecord, evidence: HitEvidence = {}): Promis
   }
 
   console.log(
-    `[hit] trace=${rec.id} kind=${rec.kind} ip=${rec.ip} ua="${rec.ua.slice(0, 80)}"`,
+    `[hit] trace=${rec.id} kind=${rec.kind} ip=${rec.ip.slice(0, 80)} ua="${rec.ua.slice(0, 80)}"`,
   );
 }
 

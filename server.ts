@@ -608,11 +608,11 @@ async function handleHomepage(
       console.warn(`[homepage] could not store root hit for trace ${id}; seed may still exist`);
     }
 
-    console.log(`[homepage] trace=${id} ip=${ip} ua="${ua.slice(0, 80)}"`);
+    console.log(`[homepage] trace=${id} ip=${ip.slice(0, 80)} ua="${ua.slice(0, 80)}"`);
   } else {
     // Reusing an existing trace — do NOT log a new homepage hit (the original
     // hit is already the root of the waterfall).
-    console.log(`[homepage] reuse trace=${id} ip=${ip} ua="${ua.slice(0, 80)}"`);
+    console.log(`[homepage] reuse trace=${id} ip=${ip.slice(0, 80)} ua="${ua.slice(0, 80)}"`);
   }
 
   // Optional UA filter (case-insensitive substring) from ?ua=…
@@ -871,7 +871,7 @@ async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise
   const path = url.pathname;
   const ip = clientIp(req, info);
   console.log(
-    `[req] ${req.method} ${path} ip=${ip} ua="${
+    `[req] ${req.method} ${path} ip=${ip.slice(0, 80)} ua="${
       (req.headers.get("user-agent") ?? "").slice(0, 80)
     }"`,
   );

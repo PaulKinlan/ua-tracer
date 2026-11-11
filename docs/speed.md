@@ -18,6 +18,12 @@ typecheck cache (~5 s cold, i.e. the first run after a Deno upgrade), the mappin
 original seven code suites ~1.3 s, and the browser journey ~3.6 s when — and only when — the delta
 touches it.
 
+**Empty delta (ua-tracer-09q).** A clean tree with no commits ahead of the base runs the whole fast
+set but not the browser journey, because no browser file can have changed: measured on 2026-11-11,
+11 fast suites + both guards + `check:all` = **~6.3–7.7 s wall warm, ~20 s cold** (cold typecheck +
+the guard's scratch clone on the first run), where the same path used to add the browser tier's ~5 s
+in-test / 7–11 s wall. The full tier still runs the browser journey unconditionally.
+
 Both tiers include `deno task check:all` (fmt + lint + typecheck). The full tier is the fast tier
 with every suite, not the affected subset, plus the browser journey.
 

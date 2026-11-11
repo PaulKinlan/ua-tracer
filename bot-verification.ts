@@ -51,6 +51,17 @@ const UNVERIFIABLE_BOTS: { name: string; uaMatches: string[] }[] = [
   { name: "ChatGPT-User", uaMatches: ["ChatGPT-User"] },
 ];
 
+/**
+ * Whether a classified bot family has published CIDR ranges an address could be
+ * checked against. Callers rewriting a classification note (backfill-verified)
+ * need this: for a family with no published ranges the only truthful note is
+ * "does not publish IP ranges", and no address-provenance statement may replace
+ * it — there were never ranges to check (ua-tracer-94u).
+ */
+export function botPublishesRanges(bot: string): boolean {
+  return BOT_RANGE_SOURCES.some((s) => s.name === bot);
+}
+
 const BOT_RANGES_TTL_MS = 24 * 60 * 60 * 1000; // refresh cached ranges daily
 const BOT_RANGE_FETCH_TIMEOUT_MS = 5_000; // cold/expired lookups run on GET /
 
@@ -154,7 +165,9 @@ export async function classifyBot(
   ua: string,
   deps: BotDependencies = {},
 ): Promise<BotVerification | null> {
-  const ipNorm = ip === null ? null : ip.replace(/^::ffff:/, "").trim();
+  // Case-insensitive: IPv6 hex groups are case-insensitive, so `::FFFF:` is the
+  // same mapped address (ua-tracer-5k6).
+  const ipNorm = ip === null ? null : ip.replace(/^::ffff:/i, "").trim();
   const uaLower = (ua || "").toLowerCase();
 
   for (const source of BOT_RANGE_SOURCES) {
@@ -169,6 +182,27 @@ export async function classifyBot(
           note: `no trusted client address was available to check ${source.name} ranges`,
         };
       }
+      const ipInt = ipv4ToInt(ipNorm);
+      if (ipInt === null && ipNorm.includes(":")) {
+        // The peer is a valid address this checker cannot judge: a plain IPv6
+        // address (the IPv4-mapped ::ffff: form is normalised above). Only IPv4
+        // CIDR matching is implemented and some operators publish IPv6 ranges we
+        // do not match — calling this 'unverified' would accuse the UA of
+        // spoofing an address we never checked (tm-bot-verdict-ipv6-false-spoof,
+        // ua-tracer-917). Like the no-address case, no range fetch either: the
+        // answer cannot depend on the ranges.
+        //
+        // Keyed on the address FAMILY (":") and not merely on ipv4ToInt failing:
+        // a stored record can carry the "unknown" sentinel or no address at all,
+        // and labelling those "IPv6" persists a false note (ua-tracer-505). Such
+        // values fall through to the range check below, where they simply cannot
+        // match, and the backfill's provenance guard rewrites the note.
+        return {
+          bot: source.name,
+          status: "unverifiable",
+          note: `client address is IPv6, not checked against ${source.name} published IPv4 ranges`,
+        };
+      }
       const ranges = await getBotRanges(source, deps);
       if (!ranges) {
         return {
@@ -177,7 +211,7 @@ export async function classifyBot(
           note: `${source.name} published ranges temporarily unavailable`,
         };
       }
-      const ipInt = ipv4ToInt(ipNorm);
+      // ipInt is null for the fall-through values above ("unknown", ""): no match.
       const inRange = ipInt !== null &&
         ranges.some((r) => r.includes(".") && cidrContains4(r, ipInt));
       return {

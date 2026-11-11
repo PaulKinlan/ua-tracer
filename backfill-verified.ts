@@ -25,7 +25,7 @@ import {
   type TraceStats,
   uaIndexKey,
 } from "./storage.ts";
-import { type BotVerification, classifyBot } from "./bot-verification.ts";
+import { botPublishesRanges, type BotVerification, classifyBot } from "./bot-verification.ts";
 
 export interface BackfillVerifiedResult {
   scanned: number;
@@ -63,9 +63,16 @@ export interface BackfillVerifiedResult {
  */
 export type IpSource = "peer" | "claimed" | "unknown";
 
-/** Same address, however the runtime spelled it (`::ffff:1.2.3.4` is `1.2.3.4`). */
+/**
+ * Same address, however the runtime spelled it (`::ffff:1.2.3.4` is `1.2.3.4`).
+ * Case-insensitive like clientIp()/classifyBot(): the request path strips the
+ * mapped prefix from the CLAIM it stores as `ip` but the recorded header stays
+ * verbatim, so a `::FFFF:` claim must still equate with the stored `1.2.3.4` —
+ * otherwise the record mis-reads as "peer" and the backfill mints a verified
+ * badge from an address the client wrote (ua-tracer-7si).
+ */
 function sameAddress(a: string, b: string): boolean {
-  const norm = (v: string) => v.trim().replace(/^::ffff:/, "");
+  const norm = (v: string) => v.trim().replace(/^::ffff:/i, "");
   return norm(a) === norm(b);
 }
 
@@ -190,9 +197,21 @@ export async function runBackfillVerified(
     if (classified && source !== "peer") {
       unprovenanced++;
       if (classified.status === "verified") withheldVerified++;
-      if (classified.status !== "unverifiable") {
-        // "unverifiable", deliberately not "unverified": the address was not checked, and
-        // saying "unverified" would accuse the UA of spoofing an address we never trusted.
+      // "unverifiable", deliberately not "unverified": the address was not checked, and
+      // saying "unverified" would accuse the UA of spoofing an address we never trusted.
+      //
+      // The provenance note replaces the classified one even when the classification
+      // already came back 'unverifiable' (ua-tracer-505): classifyBot's
+      // note describes whatever address string it was handed, which for a stored record
+      // is a client claim or the "unknown" sentinel, not a peer — so its note ("client
+      // address is IPv6…") is at best incomplete and at worst false, and persisting it
+      // would silently drop the provenance warning this run exists to publish.
+      //
+      // One exception: a bot that publishes NO ranges (ChatGPT-User) was never going to
+      // be range-checked, so "its ranges could not be checked" would be a false claim.
+      // Its only truthful note is classifyBot's "does not publish IP ranges" one, which
+      // stays (ua-tracer-94u).
+      if (botPublishesRanges(classified.bot)) {
         result = {
           bot: classified.bot,
           status: "unverifiable",

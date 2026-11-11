@@ -98,6 +98,18 @@ Deno.test("clientIp is the connection peer, not a claim the request makes about 
   const mapped = clientIp(new Request("https://uatracer.com/"), peer("::ffff:203.0.113.7"));
   if (mapped !== "203.0.113.7") throw new Error(`IPv4-mapped peer -> ${mapped}`);
 
+  // IPv6 hex groups are case-insensitive: the same mapped peer, uppercased (ua-tracer-5k6).
+  const mappedUpper = clientIp(new Request("https://uatracer.com/"), peer("::FFFF:203.0.113.7"));
+  if (mappedUpper !== "203.0.113.7") {
+    throw new Error(`uppercase IPv4-mapped peer -> ${mappedUpper}`);
+  }
+
+  // A forwarding header is client text and can be spelled any way; same normalisation.
+  const claimedMapped = clientIp(
+    new Request("https://uatracer.com/", { headers: { "x-forwarded-for": "::FFFF:66.249.66.1" } }),
+  );
+  if (claimedMapped !== "66.249.66.1") throw new Error(`claimed mapped header -> ${claimedMapped}`);
+
   // Without connection metadata the claimed address is still recorded, in the
   // documented order, so a handler called without `info` logs something useful.
   const claimed = clientIp(

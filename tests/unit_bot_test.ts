@@ -48,9 +48,41 @@ Deno.test("an IPv4-mapped IPv6 client IP is normalised before matching", async (
   if (v?.status !== "verified") throw new Error(JSON.stringify(v));
 });
 
-Deno.test("a plain IPv6 client IP cannot match an IPv4 range (and never verifies)", async () => {
+Deno.test("an uppercase IPv4-mapped IPv6 client IP is the same address (ua-tracer-5k6)", async () => {
+  // IPv6 hex groups are case-insensitive, so ::FFFF:66.249.66.7 IS ::ffff:66.249.66.7 -
+  // an address inside the seeded Googlebot range. It must not fall into the IPv6 branch.
+  const v = await classifyBot("::FFFF:66.249.66.7", "Googlebot/2.1");
+  if (v?.status !== "verified") throw new Error(JSON.stringify(v));
+});
+
+Deno.test("a plain IPv6 client IP is unverifiable, never a spoof verdict", async () => {
+  // tm-bot-verdict-ipv6-false-spoof (ua-tracer-917): IPv6 ranges are not matched,
+  // so the honest verdict is 'unverifiable' — 'unverified' would accuse the UA
+  // of spoofing an address that was never checked. The never-verifies invariant
+  // still holds.
   const v = await classifyBot("2001:4860:4801:1100::1", "Googlebot/2.1");
-  if (v?.status !== "unverified") throw new Error(JSON.stringify(v));
+  if (v?.status !== "unverifiable") throw new Error(JSON.stringify(v));
+  if (!v.note.includes("IPv6")) throw new Error(v.note);
+  // The IPv6 verdict fires before any range lookup: OAI-SearchBot is deliberately
+  // unseeded (the fail-closed control below), so an 'unavailable ranges' note
+  // here would mean the fetch ran first.
+  const noRanges = await classifyBot("2001:4860:4801:1100::1", "OAI-SearchBot/1.0");
+  if (noRanges?.status !== "unverifiable" || !noRanges.note.includes("IPv6")) {
+    throw new Error(JSON.stringify(noRanges));
+  }
+});
+
+Deno.test("a non-address string is not labelled IPv6 (ua-tracer-505)", async () => {
+  // The IPv6 branch is keyed on the address family, not on ipv4ToInt failing: a stored
+  // record can carry clientIp()'s "unknown" sentinel or no address at all, and those are
+  // not IPv6 addresses. They fall through to the range check and cannot match it.
+  for (const notAnAddress of ["unknown", ""]) {
+    const v = await classifyBot(notAnAddress, "Googlebot/2.1");
+    if (v?.status !== "unverified") throw new Error(JSON.stringify(v));
+    if (v.note.includes("IPv6")) {
+      throw new Error(`${JSON.stringify(notAnAddress)} was labelled IPv6: ${v.note}`);
+    }
+  }
 });
 
 Deno.test("UA matching is case-insensitive", async () => {

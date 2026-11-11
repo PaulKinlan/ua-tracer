@@ -160,6 +160,13 @@ Deno.test("storedIpSource reads provenance back out of the record", () => {
   // The runtime may spell an IPv4 peer either way on either side of the comparison.
   const mapped = withHeaders({ "x-forwarded-for": "66.249.66.9" }, "::ffff:66.249.66.9");
   if (storedIpSource(mapped) !== "claimed") throw new Error("an IPv4-mapped match was missed");
+  // Case-insensitive, like clientIp(): the stored ip is the normalised claim, the recorded
+  // header is verbatim client text — a ::FFFF: claim must still read as claimed, or the
+  // backfill would mint a verified badge from an address the client wrote (ua-tracer-7si).
+  const upperClaim = withHeaders({ "x-forwarded-for": "::FFFF:66.249.66.9" }, "66.249.66.9");
+  if (storedIpSource(upperClaim) !== "claimed") {
+    throw new Error("an uppercase-mapped claim was read as a peer address");
+  }
   // An empty header is ignored by the request path, so it cannot be the source.
   const emptyHeader = withHeaders({ "x-forwarded-for": "" }, "203.0.113.7");
   if (storedIpSource(emptyHeader) !== "peer") {
@@ -229,6 +236,105 @@ Deno.test("a verdict is never minted from an address the client wrote", async ()
     throw new Error("a re-run republished a verdict for an unprovenanced address");
   }
   if (second.tally["verified Googlebot"] !== 1) throw new Error(JSON.stringify(second.tally));
+});
+
+Deno.test("the persisted note is true for a trace with no address or a claimed IPv6 header (ua-tracer-505)", async () => {
+  await clearKv();
+  const kv = await testKv();
+  await seedBotRanges({ "Googlebot": ["66.249.64.0/19"] });
+
+  // No address evidence at all: clientIp()'s sentinel, only a user-agent header.
+  const noAddr = trace("noAddr", GOOGLEBOT_UA, "unknown");
+  // An IPv6 address the CLIENT wrote: the claim arrives in a forwarding header.
+  const fwd6 = traceFromHeader("fwd6", GOOGLEBOT_UA, "2001:db8::5", "x-forwarded-for", TS + 1);
+  // Control: a genuine IPv6 PEER (no forwarding header) keeps the address-family note.
+  const peer6 = trace("peer6", GOOGLEBOT_UA, "2001:4860:4801:1100::1", TS + 2);
+
+  for (const t of [noAddr, fwd6, peer6]) await seed(kv, t, true);
+
+  const result = await runBackfillVerified(kv);
+  if (result.unprovenanced !== 2) throw new Error(`unprovenanced ${result.unprovenanced}`);
+
+  const noteOf = async (id: string) => (await kv.get<TraceRecord>(["trace", id])).value?.verified;
+  const noAddrV = await noteOf("noAddr");
+  if (
+    noAddrV?.status !== "unverifiable" ||
+    !noAddrV.note.includes("no client address was recorded")
+  ) {
+    throw new Error(`noAddr: ${JSON.stringify(noAddrV)}`);
+  }
+  const fwd6V = await noteOf("fwd6");
+  if (
+    fwd6V?.status !== "unverifiable" ||
+    !fwd6V.note.includes("came from a forwarding header, which the client writes")
+  ) {
+    throw new Error(`fwd6: ${JSON.stringify(fwd6V)}`);
+  }
+  for (const [id, v] of [["noAddr", noAddrV], ["fwd6", fwd6V]] as const) {
+    if (v?.note.includes("IPv6")) {
+      throw new Error(`${id}: the false IPv6 note persisted: ${v?.note}`);
+    }
+  }
+  // The peer trace's IPv6 note is TRUE and must survive the provenance guard.
+  const peer6V = await noteOf("peer6");
+  if (peer6V?.status !== "unverifiable" || !peer6V.note.includes("IPv6")) {
+    throw new Error(`peer6: ${JSON.stringify(peer6V)}`);
+  }
+  // The notes reach the pages through the snapshots, so they must be mirrored too.
+  const fwd6Snap = (await kv.get<TraceStats>(recentIndexKey(fwd6.ts, fwd6.id))).value;
+  if (!fwd6Snap?.verified?.note.includes("forwarding header")) {
+    throw new Error(`fwd6 snapshot: ${JSON.stringify(fwd6Snap?.verified)}`);
+  }
+});
+
+Deno.test("a bot with no published ranges keeps its unfalsifiable note, whatever the provenance (ua-tracer-94u)", async () => {
+  await clearKv();
+  const kv = await testKv();
+  await seedBotRanges({ "Googlebot": ["66.249.64.0/19"] });
+
+  // ChatGPT-User publishes no ranges, so no address could ever be range-checked:
+  // claiming its "ranges could not be checked" would be false. The provenance
+  // substitution must leave the one truthful note alone.
+  const claimed = traceFromHeader("gptClaimed", "ChatGPT-User/1.0", "203.0.113.9");
+  const noAddr = trace("gptNoAddr", "ChatGPT-User/1.0", "unknown", TS + 1);
+  for (const t of [claimed, noAddr]) await seed(kv, t, true);
+
+  await runBackfillVerified(kv);
+  for (const t of [claimed, noAddr]) {
+    const v = (await kv.get<TraceRecord>(["trace", t.id])).value?.verified;
+    if (v?.status !== "unverifiable" || !v.note.includes("does not publish IP ranges")) {
+      throw new Error(`${t.id}: ${JSON.stringify(v)}`);
+    }
+    if (
+      v.note.includes("ranges were not checked") || v.note.includes("ranges could not be checked")
+    ) {
+      throw new Error(`${t.id}: claims ranges that do not exist: ${v.note}`);
+    }
+  }
+});
+
+Deno.test("an uppercase-mapped claimed address never earns a verified badge (ua-tracer-7si)", async () => {
+  await clearKv();
+  const kv = await testKv();
+  await seedBotRanges({ "Googlebot": ["66.249.64.0/19"] });
+
+  // Exactly what clientIp() stores for a no-peer request whose x-forwarded-for is
+  // uppercase-mapped: ip is the NORMALISED claim, the recorded header is verbatim.
+  // Whether the client capitalises its own header must not decide the badge.
+  const upper = trace("upper", GOOGLEBOT_UA, "66.249.66.7", TS + 10);
+  upper.headers = { "user-agent": GOOGLEBOT_UA, "x-forwarded-for": "::FFFF:66.249.66.7" };
+  const lower = trace("lower", GOOGLEBOT_UA, "66.249.66.7", TS + 11);
+  lower.headers = { "user-agent": GOOGLEBOT_UA, "x-forwarded-for": "::ffff:66.249.66.7" };
+  for (const t of [upper, lower]) await seed(kv, t, true);
+
+  const result = await runBackfillVerified(kv);
+  if (result.unprovenanced !== 2) throw new Error(`unprovenanced ${result.unprovenanced}`);
+  for (const id of ["upper", "lower"]) {
+    const v = (await kv.get<TraceRecord>(["trace", id])).value?.verified;
+    if (v?.status !== "unverifiable" || !v.note.includes("forwarding header")) {
+      throw new Error(`${id}: a client-written address earned ${JSON.stringify(v)}`);
+    }
+  }
 });
 
 Deno.test("backfill-verified skips malformed trace entries", async () => {

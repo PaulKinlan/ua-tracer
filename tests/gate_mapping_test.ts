@@ -1112,9 +1112,9 @@ Deno.test("the on-demand production harness is in no gate tier and maps only to 
 //
 //  1. every `file:line` / `file:from-to` ref names a tracked file and stays
 //     inside it (a rename or a deletion cannot leave a pointer to nowhere);
-//  2. where the doc names a code symbol beside a citation, that symbol is
-//     around the cited line (+-7). Prose words are ignored, so this does not
-//     fire on English that happens to look like an identifier.
+//  2. where the doc names a code symbol beside a citation, at least one named
+//     symbol is code in that file within +-7 lines of the citation; prose
+//     mentions of other symbols in the same clause neither anchor nor fail it.
 //
 // A ref that drifts because the code moved under it fails here, which is the
 // signal to re-derive the number rather than to trust it.
@@ -1134,36 +1134,41 @@ const PROSE_ACRONYMS = new Set([
   "GET",
 ]);
 
+const fileExt = /\.(ts|md|json|yml|sh|conf)$/;
+const hexish = /^[0-9a-f]{5,40}$/;
+
+// A symbol is code-shaped (camelCase, snake_case, CONSTANT, dotted) and long
+// enough not to be English. Bead ids and hyphenated prose are excluded.
+function symbolsIn(s: string): string[] {
+  const found: string[] = [];
+  for (const raw of s.match(/[A-Za-z_][A-Za-z0-9_.-]{2,}/g) ?? []) {
+    const tok = raw.replace(/^[.-]+|[.-]+$/g, "");
+    if (tok.length < 4 || fileExt.test(tok) || hexish.test(tok) || tok.includes("-")) continue;
+    // Web acronyms are prose in a threat model ("a string in HTML"), not symbols
+    // of the cited file, so they must never anchor (or fail) a citation.
+    if (PROSE_ACRONYMS.has(tok.toUpperCase())) continue;
+    // Only a code-shaped token anchors: a plain lowercase word is English here
+    // ("request headers are redacted"), so it can neither anchor nor fail a
+    // citation. The cost is that a lowercase symbol like `handler` is checked for
+    // range only; every camelCase/snake_case/CONSTANT symbol is fully checked,
+    // and so is a dotted identifier (Deno.serve, kv.atomic): every dot-joined
+    // segment at least two identifier characters, which keeps prose
+    // abbreviations ("e.g.", "i.e.") and single-letter runs out (ua-tracer-u1b).
+    const codeish = /[A-Z]/.test(tok.slice(1)) || /[a-z][A-Z]/.test(tok) ||
+      tok.includes("_") || (tok === tok.toUpperCase() && tok.length > 3) || tok.length >= 12 ||
+      /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(tok);
+    if (codeish && !found.includes(tok)) found.push(tok);
+  }
+  return found;
+}
+
 Deno.test("THREAT_MODEL.md's refs resolve and a cited symbol is beside its line", async () => {
   const marker = "THREAT_MODEL.md";
   const text = await Deno.readTextFile(new URL(`../${marker}`, import.meta.url));
   const refPattern = /([A-Za-z0-9_./-]+\.(?:ts|md|json|yml|sh|conf)):(\d+)(?:-(\d+))?/g;
-  const fileExt = /\.(ts|md|json|yml|sh|conf)$/;
-  const hexish = /^[0-9a-f]{5,40}$/;
   const failures: string[] = [];
   let refs = 0;
   let anchored = 0;
-
-  // A symbol is code-shaped (camelCase, snake_case, CONSTANT, dotted) and long
-  // enough not to be English. Bead ids and hyphenated prose are excluded.
-  const symbolsIn = (s: string): string[] => {
-    const found: string[] = [];
-    for (const raw of s.match(/[A-Za-z_][A-Za-z0-9_.-]{2,}/g) ?? []) {
-      const tok = raw.replace(/^[.-]+|[.-]+$/g, "");
-      if (tok.length < 4 || fileExt.test(tok) || hexish.test(tok) || tok.includes("-")) continue;
-      // Web acronyms are prose in a threat model ("a string in HTML"), not symbols
-      // of the cited file, so they must never anchor (or fail) a citation.
-      if (PROSE_ACRONYMS.has(tok.toUpperCase())) continue;
-      // Only a code-shaped token anchors: a plain lowercase word is English here
-      // ("request headers are redacted"), so it can neither anchor nor fail a
-      // citation. The cost is that a lowercase symbol like `handler` is checked for
-      // range only; every camelCase/snake_case/CONSTANT symbol is fully checked.
-      const codeish = /[A-Z]/.test(tok.slice(1)) || /[a-z][A-Z]/.test(tok) ||
-        tok.includes("_") || (tok === tok.toUpperCase() && tok.length > 3) || tok.length >= 12;
-      if (codeish && !found.includes(tok)) found.push(tok);
-    }
-    return found;
-  };
 
   for (const [i, line] of text.split("\n").entries()) {
     for (const match of line.matchAll(refPattern)) {
@@ -1187,6 +1192,17 @@ Deno.test("THREAT_MODEL.md's refs resolve and a cited symbol is beside its line"
       // The 40 characters immediately before the ref are its own clause: what the
       // sentence attributes to this pointer, not to the ref beside it.
       const context = line.slice(Math.max(0, match.index - 40), match.index);
+      // The clause may name more than one symbol, and prose mentions travel
+      // with it: "the connection peer from `Deno.serve` info (`peerIp`,
+      // server.ts:74)" names both, but only peerIp is what the pointer is about
+      // (ua-tracer-u1b). So the ref anchors on the first named symbol that is
+      // really code in this file AND sits inside the +-7 window; only when NO
+      // named symbol is within the window does the citation fail, naming the
+      // nearest out-of-range one. (Anchoring on the first merely-occurring
+      // symbol would let the far-away Deno.serve call that wraps the whole
+      // server steal the anchor from the peerIp that pins the line.)
+      let anchoredHere = false;
+      const outOfRange: { symbol: string; occurs: number[] }[] = [];
       for (const symbol of symbolsIn(context)) {
         // Only a symbol that really is code in this file can anchor anything;
         // otherwise the word is English and says nothing about the pointer.
@@ -1202,15 +1218,20 @@ Deno.test("THREAT_MODEL.md's refs resolve and a cited symbol is beside its line"
           if (asCode.test(sl)) occurs.push(n + 1);
         });
         if (occurs.length === 0) continue;
-        anchored++;
-        if (!occurs.some((n) => n >= from - 7 && n <= to + 7)) {
-          failures.push(
-            `${marker}:${i + 1} cites ${whole} for \`${symbol}\`, which is at ${
-              file.split("/").pop()
-            }:${occurs.slice(0, 3).join("/")} — re-derive the number`,
-          );
+        if (occurs.some((n) => n >= from - 7 && n <= to + 7)) {
+          anchoredHere = true;
+          break;
         }
-        break;
+        outOfRange.push({ symbol, occurs });
+      }
+      if (anchoredHere) anchored++;
+      else if (outOfRange.length > 0) {
+        const { symbol, occurs } = outOfRange[0];
+        failures.push(
+          `${marker}:${i + 1} cites ${whole} for \`${symbol}\`, which is at ${
+            file.split("/").pop()
+          }:${occurs.slice(0, 3).join("/")} — re-derive the number`,
+        );
       }
     }
   }
@@ -1222,4 +1243,31 @@ Deno.test("THREAT_MODEL.md's refs resolve and a cited symbol is beside its line"
   // Sanity: the anchor half of the check must be doing real work, not skipping
   // every ref because the prose stopped naming symbols.
   if (anchored < 20) throw new Error(`only ${anchored}/${refs} refs are symbol-anchored`);
+});
+
+Deno.test("symbolsIn reads dotted identifiers as code, prose abbreviations as prose", () => {
+  // ua-tracer-u1b: the predicate's own comment promised "dotted", but every
+  // all-lowercase dotted token under 12 characters (Deno.serve, kv.atomic, req.url)
+  // fell out of every codeish arm and was silently dropped - a citation whose only
+  // named symbol was such a token was bounds-checked but never symbol-anchored.
+  const want = (got: string[], expected: string[]) => {
+    if (JSON.stringify(got) !== JSON.stringify(expected)) {
+      throw new Error(
+        `symbolsIn returned ${JSON.stringify(got)}, expected ${JSON.stringify(expected)}`,
+      );
+    }
+  };
+  // The bead's repro, and the ref beside it (THREAT_MODEL.md:57's clause).
+  want(symbolsIn("eer from `Deno.serve` info** (`peerIp`,"), ["Deno.serve", "peerIp"]);
+  want(symbolsIn("the `Deno.serve` call ("), ["Deno.serve"]);
+  want(symbolsIn("`kv.atomic` swap"), ["kv.atomic"]);
+  // Single-letter dotted segments are prose abbreviations, not identifiers;
+  // file-shaped tokens are a file reference, not a symbol.
+  want(symbolsIn("drift e.g. i.e. somewhere"), []);
+  want(symbolsIn("re-read speed.md first"), []);
+  // Plain lowercase words and prose acronyms stay unanchored, as before.
+  want(symbolsIn("request headers are redacted"), []);
+  want(symbolsIn("a string in HTML"), []);
+  // The pre-existing codeish classes are unchanged.
+  want(symbolsIn("the logHit casRetry path"), ["logHit", "casRetry"]);
 });

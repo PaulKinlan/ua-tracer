@@ -7,25 +7,30 @@ run.
 
 ## Tiers and budgets
 
-| Tier              | Command                                | Budget                  | Measured (2026-10-12, 2-vCPU VM, warm)                             |
-| ----------------- | -------------------------------------- | ----------------------- | ------------------------------------------------------------------ |
-| Fast              | `deno task test:fast`                  | **<= 60 s** (fleet R2)  | ~7 s end to end (code-only delta: ~3 s)                            |
-| Full              | `deno task test:full`                  | **<= 300 s** (fleet R1) | ~7 s end to end                                                    |
-| Changed file only | `deno task test:file tests/<suite>.ts` | —                       | ~1.3 s for the original seven code suites (re-measure after split) |
+| Tier              | Command                                | Budget                  | Measured (2-vCPU VM, deno 2.9.7, no deps; re-measured 2026-11-11)                                                                                                   |
+| ----------------- | -------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fast              | `deno task test:fast`                  | **<= 60 s** (fleet R2)  | ~3 s warm on a mapped code-only delta (2.9–3.1 s fully warm; ~8 s with partially cold caches); ~3–8 s warm / ~12 s cold on the EMPTY-delta path (composition below) |
+| Full              | `deno task test:full`                  | **<= 300 s** (fleet R1) | ~8 s warm, ~19 s cold                                                                                                                                               |
+| Changed file only | `deno task test:file tests/<suite>.ts` | —                       | ~1.3 s for the original seven code suites (re-measure after split)                                                                                                  |
 
-Composition of the measured fast run: `check:all` (fmt + lint + typecheck) ~0.2 s with a warm
-typecheck cache (~5 s cold, i.e. the first run after a Deno upgrade), the mapping guard ~0.9 s, the
-original seven code suites ~1.3 s, and the browser journey ~3.6 s when — and only when — the delta
-touches it.
+Composition of the measured runs (2026-11-11, this VM): `check:all` (fmt + lint + typecheck) is ~0.1
+s with a warm typecheck cache (~5 s cold — the first run after a Deno upgrade or an isolated
+`DENO_DIR`), the gate guards ~1.3 s wall / ~1 s in-test (26 mapping + 8 config tests), the 11 code
+suites ~2 s in-test / 147 tests, and the browser journey ~3 s in-test / ~4–11 s wall once headless
+Chrome startup is paid (other lanes measured 5 s in-test / 7–11 s wall; Chrome startup is the
+variance). The bulk of a COLD run's non-test time is deno's own type-check/compile of the module
+graph across the spawned `deno` processes — roughly 5 s of the ~12 s cold empty-delta run. That
+compile overhead is the thing to optimise if these paths must get faster.
 
 **Empty delta (ua-tracer-09q).** A clean tree with no commits ahead of the base runs the whole fast
 set but not the browser journey, because no browser file can have changed: measured on 2026-11-11,
-11 fast suites + both guards + `check:all` = **~6.3–7.7 s wall warm, ~20 s cold** (cold typecheck +
-the guard's scratch clone on the first run), where the same path used to add the browser tier's ~5 s
-in-test / 7–11 s wall. The full tier still runs the browser journey unconditionally.
+11 fast suites + both guards + `check:all` = **~3–8 s wall warm, ~12 s cold** (isolated `DENO_DIR`;
+deeper-cold first runs land slower), where the pre-09q path paid the browser tier as well on every
+clean branch. The full tier still runs the browser journey unconditionally.
 
-Both tiers include `deno task check:all` (fmt + lint + typecheck). The full tier is the fast tier
-with every suite, not the affected subset, plus the browser journey.
+Both tiers include `deno task check:all` (fmt + lint + typecheck). The full tier is `--all-suites`:
+the fast set plus the browser journey, whatever the delta. A fast run on a non-empty delta is the
+affected subset; on an empty delta it is the fast set without the journey.
 
 ### Not in any tier: `tools/prod-probe-loop.ts`
 
@@ -105,32 +110,34 @@ VM).
 `tools/fast-gate.sh` maps a changed path to the suites it must run (`--map <path>` prints the
 mapping; `--dry-run` prints the resolved set):
 
-| Changed path                                                                                               | Suites                                                                                                                                                                                   |
-| ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server.ts`, `tests/testenv.ts`                                                                            | every non-browser suite (entrypoint wiring and shared test environment)                                                                                                                  |
-| `storage.ts`                                                                                               | `unit_keys_test`, `kv_behaviour_test`, `backfill_test`, `backfill_verified_test`, `http_test`                                                                                            |
-| `bot-verification.ts`                                                                                      | `unit_bot_test`, `unit_format_test`, `backfill_verified_test`, `http_test`                                                                                                               |
-| `probes.ts`                                                                                                | `unit_probes_test`, `http_test`, `kv_behaviour_test` (the browser journey is not in this row's set: it runs when the delta touches a browser file, and unconditionally in the full tier) |
-| `views.ts`                                                                                                 | `unit_views_test`, `unit_format_test`, `http_test`                                                                                                                                       |
-| `backfill.ts`                                                                                              | `backfill_test`                                                                                                                                                                          |
-| `backfill-verified.ts`                                                                                     | `backfill_verified_test`, `unit_bot_test`                                                                                                                                                |
-| `deploy-check.ts`                                                                                          | `deploy_check_test` (standalone: nothing imports it, and its fetch is injected, so no network)                                                                                           |
-| `crons.ts`                                                                                                 | `cron_test`, `http_test`, `gate_mapping_test` (the repair schedule and what `/api/health` reports about it; the guard covers the entrypoint placement)                                   |
-| `tests/<suite>.ts`                                                                                         | that suite, including the browser suite: a change to it is exactly when a browser run is worth paying for                                                                                |
-| `tests/browser_journey_test.ts`                                                                            | that suite, run as `deno task test:browser` (~3.6 s)                                                                                                                                     |
-| `deno.json`, `tools/*`, `README.md`, `AGENTS.md`, `docs/*`, `LICENSE`, `.gitignore`, `.github/workflows/*` | `gate_mapping_test` (the bounded subset that proves the dispatcher still maps; both guard suites run on every invocation anyway)                                                         |
-| anything else                                                                                              | **fails closed (exit 2)**, naming the file                                                                                                                                               |
+| Changed path                                                                                                                  | Suites                                                                                                                                                                                   |
+| ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server.ts`, `tests/testenv.ts`                                                                                               | every non-browser suite (entrypoint wiring and shared test environment)                                                                                                                  |
+| `storage.ts`                                                                                                                  | `unit_keys_test`, `kv_behaviour_test`, `backfill_test`, `backfill_verified_test`, `http_test`                                                                                            |
+| `bot-verification.ts`                                                                                                         | `unit_bot_test`, `unit_format_test`, `backfill_verified_test`, `http_test`                                                                                                               |
+| `probes.ts`                                                                                                                   | `unit_probes_test`, `http_test`, `kv_behaviour_test` (the browser journey is not in this row's set: it runs when the delta touches a browser file, and unconditionally in the full tier) |
+| `views.ts`                                                                                                                    | `unit_views_test`, `unit_format_test`, `http_test`                                                                                                                                       |
+| `backfill.ts`                                                                                                                 | `backfill_test`                                                                                                                                                                          |
+| `backfill-verified.ts`                                                                                                        | `backfill_verified_test`, `unit_bot_test`                                                                                                                                                |
+| `deploy-check.ts`                                                                                                             | `deploy_check_test` (standalone: nothing imports it, and its fetch is injected, so no network)                                                                                           |
+| `crons.ts`                                                                                                                    | `cron_test`, `http_test`, `gate_mapping_test` (the repair schedule and what `/api/health` reports about it; the guard covers the entrypoint placement)                                   |
+| `tests/<suite>.ts`                                                                                                            | that suite, including the browser suite: a change to it is exactly when a browser run is worth paying for                                                                                |
+| `tests/browser_journey_test.ts`                                                                                               | that suite, run as `deno task test:browser` (~3 s in-test; ~4–11 s wall incl. Chrome startup)                                                                                            |
+| `deno.json`, `tools/*`, `README.md`, `AGENTS.md`, `THREAT_MODEL.md`, `docs/*`, `LICENSE`, `.gitignore`, `.github/workflows/*` | `gate_mapping_test` (the bounded subset that proves the dispatcher still maps; both guard suites run on every invocation anyway)                                                         |
+| anything else                                                                                                                 | **fails closed (exit 2)**, naming the file                                                                                                                                               |
 
-An empty delta runs every fast suite but **not** the browser journey: "nothing changed" must never
-mean "nothing verified", and no browser file can have changed in an empty delta, so a headless
-Chrome there would buy cost rather than signal (ua-tracer-09q). A change to a browser suite still
-selects it, and the full tier (`--all-suites`, what the merger runs) always includes it. The mapping
-is self-checking: `tests/gate_mapping_test.ts` walks `git ls-files` and fails if any tracked file is
-unmapped, and proves the fail-closed behaviour with a real unmapped file in the delta. It also
-asserts the full tier is a superset of every affected-tier resolution, so "full includes fast" is
-tested rather than assumed. **This table is checked, not just written down**: the guard drives every
-concrete path in it through `--map` and compares the suite sets, so a row that no longer matches
-`map_one()` fails the gate instead of misleading the next reader.
+An empty delta runs every fast suite but **not** the browser journey, so a lane on a clean branch
+pays the ~3–8 s warm / ~12 s cold the empty-delta paragraph above records, not the few seconds a
+mapped delta costs: "nothing changed" must never mean "nothing verified", and no browser file can
+have changed in an empty delta, so a headless Chrome there would buy cost rather than signal
+(ua-tracer-09q). A change to a browser suite still selects it, and the full tier (`--all-suites`,
+what the merger runs) always includes it. The mapping is self-checking: `tests/gate_mapping_test.ts`
+walks `git ls-files` and fails if any tracked file is unmapped, and proves the fail-closed behaviour
+with a real unmapped file in the delta. It also asserts the full tier is a superset of every
+affected-tier resolution, so "full includes fast" is tested rather than assumed. **This table is
+checked, not just written down**: the guard drives every concrete path in it through `--map` and
+compares the suite sets, so a row that no longer matches `map_one()` fails the gate instead of
+misleading the next reader.
 
 ## Hermeticity
 

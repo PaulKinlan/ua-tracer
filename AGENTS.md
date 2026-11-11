@@ -43,12 +43,12 @@ moves modules and must update the map rather than silently making this page fals
 
 ## The gate
 
-| Tier        | Command                                  | Budget                                                                               | Who runs it                                                                                          |
-| ----------- | ---------------------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| Fast        | `deno task check:fast` (= `test:fast`)   | fleet R2, 60 s; measured ~3–7 s                                                      | Every lane, on every change, before hand-off (`fleet-check --fast`).                                 |
-| Full        | `deno task check` (= `test:full`)        | fleet R1, 300 s; measured ~8 s warm, ~15 s cold (the browser journey is 4–6 s of it) | **The merger only**, once per landing on the merged union (`fleet-check --full` if you are landing). |
-| One suite   | `deno task test:file tests/http_test.ts` | —                                                                                    | While iterating.                                                                                     |
-| Guards only | `deno task test:guards`                  | —                                                                                    | When you touch the gate, the config or this file.                                                    |
+| Tier        | Command                                  | Budget                                                                                                                                                       | Who runs it                                                                                          |
+| ----------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| Fast        | `deno task check:fast` (= `test:fast`)   | fleet R2, 60 s; measured ~3 s warm on a mapped delta, ~3–8 s warm / ~12 s cold on the empty-delta path (fast set, no browser — composition in docs/speed.md) | Every lane, on every change, before hand-off (`fleet-check --fast`).                                 |
+| Full        | `deno task check` (= `test:full`)        | fleet R1, 300 s; measured ~8 s warm / ~19 s cold — the fast set plus the browser journey (~3 s in-test, 4–11 s wall)                                         | **The merger only**, once per landing on the merged union (`fleet-check --full` if you are landing). |
+| One suite   | `deno task test:file tests/http_test.ts` | —                                                                                                                                                            | While iterating.                                                                                     |
+| Guards only | `deno task test:guards`                  | —                                                                                                                                                            | When you touch the gate, the config or this file.                                                    |
 
 `deno task check:all` (fmt `--check`, lint, `deno check`) is included in both tiers. The tiers run
 across 14 suite files: 2 gate guards, 11 code suites, 1 real-browser journey plus
@@ -99,7 +99,7 @@ ua-tracer-qir).
 Both guard suites (`gate_mapping_test`, `gate_config_test`) run on every invocation. An empty delta
 runs every **fast** suite but not the browser journey (ua-tracer-09q): "nothing changed" must never
 mean "nothing verified", and no browser file can have changed in an empty delta, so a headless
-Chrome there costs ~5 s of test time for no signal. A change to a browser suite still selects it,
+Chrome there costs ~3–5 s of test time for no signal. A change to a browser suite still selects it,
 and the full tier the merger runs (`--all-suites`) always includes it.
 
 ## Hermeticity (why a green gate means something)

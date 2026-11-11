@@ -410,6 +410,50 @@ Deno.test("an unknown asset name 404s even with a valid secret", async () => {
   if (res.status !== 404) throw new Error(`status ${res.status}`);
 });
 
+Deno.test("every response exit applies defensive headers without changing route caching", async () => {
+  await clearKv();
+  const { id, secret } = await mint();
+  const paths = [
+    ["/trace/missing-security-test", 404, "text/html; charset=utf-8"],
+    [`/r/${id}/${secret}/not-an-asset`, 404, "text/plain;charset=UTF-8"],
+    ["/missing-security-test", 404, "text/plain;charset=UTF-8"],
+    ["/api/health", 200, "application/json"],
+    ["/favicon.ico", 200, "image/x-icon"],
+  ] as const;
+  const expected = {
+    "content-security-policy": "default-src 'self'",
+    "strict-transport-security": "max-age=63072000; includeSubDomains",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "x-frame-options": "SAMEORIGIN",
+    "permissions-policy": "camera=()",
+  };
+  for (const [path, status, contentType] of paths) {
+    const get = await handler(req(path));
+    const head = await handler(req(path, { method: "HEAD" }));
+    if (get.status !== status || head.status !== status) {
+      throw new Error(`${path}: unexpected GET/HEAD status ${get.status}/${head.status}`);
+    }
+    for (const [name, value] of Object.entries(expected)) {
+      if (
+        !get.headers.get(name)?.includes(value) || head.headers.get(name) !== get.headers.get(name)
+      ) {
+        throw new Error(`${path}: missing or mismatched GET/HEAD ${name}`);
+      }
+    }
+    if (get.headers.get("content-type") !== contentType) {
+      throw new Error(`${path}: changed content type ${get.headers.get("content-type")}`);
+    }
+    if ((await head.text()) !== "") throw new Error(`${path}: HEAD returned a body`);
+    await get.body?.cancel();
+  }
+  const favicon = await handler(req("/favicon.ico"));
+  if (favicon.headers.get("cache-control") !== "max-age=86400") {
+    throw new Error("security baseline overrode favicon caching");
+  }
+  await favicon.body?.cancel();
+});
+
 Deno.test("HEAD returns the GET headers with an empty body", async () => {
   await clearKv();
   const get = await handler(req("/traces"));

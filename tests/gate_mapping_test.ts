@@ -877,7 +877,19 @@ Deno.test("the check tasks derive their paths from the tree instead of enumerati
   const typecheck = tasks["typecheck"];
   if (typeof typecheck !== "string" || !typecheck.includes("*.ts")) {
     throw new Error(
-      `typecheck should pass a glob (*.ts tests/*.ts) rather than a module list: ${typecheck}`,
+      `typecheck should select .ts files by glob rather than by a module list: ${typecheck}`,
+    );
+  }
+  // ua-tracer-zo3: the glob used to be `*.ts tests/*.ts`, which silently excluded
+  // tools/ - and tools/prod-probe-loop.ts is the repo's first tools/*.ts, so the
+  // on-demand production harness was compiled by no gate at all. A directory list
+  // is the same drift as the fmt/lint lists above, one level up: the next new
+  // directory is forgotten by default. Deriving the list from git means coverage
+  // is a property of the tree, so a type error in ANY tracked .ts fails the gate.
+  if (!/git ls-files/.test(typecheck)) {
+    throw new Error(
+      `typecheck should derive its file list from the tree (git ls-files '*.ts'), not from a ` +
+        `directory glob that a new directory can escape: ${typecheck}`,
     );
   }
 });
@@ -988,7 +1000,7 @@ async function trackedFiles(): Promise<string[]> {
 
 Deno.test("the on-demand production harness is in no gate tier and maps only to the guards", async () => {
   // tools/prod-probe-loop.ts drives a real headless Chrome against the LIVE site
-  // (ua-tracer-68d/g rg). A gate that ran it would make every landing depend on
+  // (ua-tracer-68d, ua-tracer-grg). A gate that ran it would make every landing depend on
   // production being up and would write traces into production KV, so the contract is
   // that the tiers stay away from it and only the mapping guard is selected by its
   // change. This is asserted because "documented as on-demand" is exactly the kind of

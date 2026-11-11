@@ -14,8 +14,8 @@ for lanes.
 ua-tracer answers "when a user agent fetches a page, what does it actually fetch and does it run the
 JS?". It is a single Deno Deploy app (live at uatracer.com):
 
-- `server.ts` is the only entrypoint (`handler`, server.ts:1004). `import.meta.main` guards the
-  `Deno.serve` call (server.ts:1032-1038), so importing the file in a script or a test starts
+- `server.ts` is the only entrypoint (`handler`, server.ts:1051). `import.meta.main` guards the
+  `Deno.serve` call (server.ts:1079-1085), so importing the file in a script or a test starts
   nothing. It routes every request, mints one trace per homepage GET, serves probe assets under
   `/r/{id}/{secret}/{asset}`, and applies response headers.
 - `storage.ts` persists traces, hits and probe logs in Deno KV (schema at storage.ts:95-131).
@@ -34,7 +34,7 @@ JS?". It is a single Deno Deploy app (live at uatracer.com):
 Anonymous internet client (any UA, any headers, any URL, any POST body)
         │  HTTPS
         ▼
-Deno Deploy edge ──► handler/routeHandler (server.ts:886,1004) ──► Deno KV (storage.ts)
+Deno Deploy edge ──► handler/routeHandler (server.ts:922,1051) ──► Deno KV (storage.ts)
         │                    │
         │                    ├─► operator-published bot-range feeds (HTTPS GET,
         │                    │   bot-verification.ts:117) — external data a verdict reads
@@ -71,7 +71,7 @@ Actors:
   entries intentional and narrow.
 - **Operator-local execution**: `deno task backfill*`, `deploy-check.ts`, tests (hermetic `:memory:`
   KV per tests/testenv.ts). Local KV and `DENO_KV_URL` are operator-held.
-- **`/api/health` disclosures** (server.ts:896-925): build id, repair schedule state, timestamps —
+- **`/api/health` disclosures** (server.ts:934-961): build id, repair schedule state, timestamps —
   deliberately non-secret deploy-verification signals.
 - **Probe assets served for unknown traces** (server.ts:411-417): serving a static asset body to a
   bot without recording a hit is intentional (probe reachability), not an information leak — the
@@ -112,10 +112,15 @@ Actors:
 
 ### 4.3 Probe URL segments: `/r/{id}[/{secret}]/{asset}`
 
-- Router regexes split the path (server.ts:946-960); `handleAsset` then gates both `id` and `secret`
-  against `PROBE_SEGMENT = /^[0-9a-zA-Z_-]{1,64}$/` (server.ts:301-310) — exactly the alphabet
-  `shortId()` mints — before any KV lookup, logging, or body generation. A crafted segment gets the
-  same 404 a missing trace gets: nothing is reflected, nothing is logged (invariant I6 /
+- **Method contract** (ua-tracer-9jp): `allowedMethodsFor` (server.ts:807) is consulted before
+  dispatch, so `OPTIONS` gets `204` + `Allow` and a method a path does not serve gets `405` +
+  `Allow` instead of being run through a handler that serves the resource. Nothing about the request
+  is reflected in either answer, it does not depend on whether an id exists, and no trace or hit is
+  written. `/api/health` is answered above the gate and accepts any method.
+- Router regexes split the path (server.ts:992-1007); `handleAsset` then gates both `id` and
+  `secret` against `PROBE_SEGMENT = /^[0-9a-zA-Z_-]{1,64}$/` (server.ts:301-310) — exactly the
+  alphabet `shortId()` mints — before any KV lookup, logging, or body generation. A crafted segment
+  gets the same 404 a missing trace gets: nothing is reflected, nothing is logged (invariant I6 /
   ua-tracer-82v). The `/trace/{id}` read applies the same gate before its own lookup (server.ts:768)
   for the same reason the probe routes do: a segment that could not have been minted must never
   become a KV key part (ua-tracer-6v1).

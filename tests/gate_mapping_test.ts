@@ -1154,12 +1154,61 @@ function symbolsIn(s: string): string[] {
     // and so is a dotted identifier (Deno.serve, kv.atomic): every dot-joined
     // segment at least two identifier characters, which keeps prose
     // abbreviations ("e.g.", "i.e.") and single-letter runs out (ua-tracer-u1b).
+    // The last arm must hold EVERY segment to that rule, not just the last one: a
+    // predicate that let `x.y` or `ab.c` through would make the sentence above a
+    // lie (ua-tracer-dnh).
     const codeish = /[A-Z]/.test(tok.slice(1)) || /[a-z][A-Z]/.test(tok) ||
       tok.includes("_") || (tok === tok.toUpperCase() && tok.length > 3) || tok.length >= 12 ||
-      /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(tok);
+      /^[A-Za-z_][A-Za-z0-9_]+(\.[A-Za-z_][A-Za-z0-9_]+)+$/.test(tok);
     if (codeish && !found.includes(tok)) found.push(tok);
   }
   return found;
+}
+
+/** Lines of `source` on which `symbol` is used as code, not prose: a whole identifier
+ * followed by the punctuation an expression would have. */
+function codeOccurrences(symbol: string, source: string[]): number[] {
+  // Whole-identifier match, so `handler` is never "found" inside `routeHandler`.
+  const asCode = new RegExp(
+    `(?<![A-Za-z0-9_])${
+      symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    }(?![A-Za-z0-9_])\\s*[(=:?.,\\]}){'"<>/]`,
+    "i",
+  );
+  const occurs: number[] = [];
+  source.forEach((line, n) => {
+    if (asCode.test(line)) occurs.push(n + 1);
+  });
+  return occurs;
+}
+
+/**
+ * Which symbol a citation's clause is about, and whether the citation is inside that symbol's
+ * neighbourhood.
+ *
+ * The 40 characters before a `file:line` are the citation's own clause, and a clause may name
+ * more than one symbol: "the connection peer from `Deno.serve` info (`peerIp`, server.ts:74)"
+ * names the wrapper call and the subject. The subject is the name NEAREST the ref - the last one
+ * in the clause that is really code in the cited file - and it ALONE decides (ua-tracer-27o).
+ * Letting any named symbol inside the +-7 window anchor was not enough: the same citation drifted
+ * onto a `Deno.serve` line passed, because the wrapper symbol the sentence mentions in passing is
+ * code somewhere inside the window. A clause whose names are all prose anchors nothing, and the
+ * ref is then bounds-checked only - English says nothing about a pointer.
+ */
+function citationDecision(
+  context: string,
+  from: number,
+  to: number,
+  occursIn: (symbol: string) => number[],
+): { anchored: boolean; anchor: { symbol: string; occurs: number[] } | null } {
+  let anchor: { symbol: string; occurs: number[] } | null = null;
+  for (const symbol of symbolsIn(context)) {
+    const occurs = occursIn(symbol);
+    // Later wins: the symbol nearest the ref is the one the pointer is about.
+    if (occurs.length) anchor = { symbol, occurs };
+  }
+  if (!anchor) return { anchored: false, anchor: null };
+  return { anchored: anchor.occurs.some((n) => n >= from - 7 && n <= to + 7), anchor };
 }
 
 Deno.test("THREAT_MODEL.md's refs resolve and a cited symbol is beside its line", async () => {
@@ -1192,41 +1241,20 @@ Deno.test("THREAT_MODEL.md's refs resolve and a cited symbol is beside its line"
       // The 40 characters immediately before the ref are its own clause: what the
       // sentence attributes to this pointer, not to the ref beside it.
       const context = line.slice(Math.max(0, match.index - 40), match.index);
-      // The clause may name more than one symbol, and prose mentions travel
-      // with it: "the connection peer from `Deno.serve` info (`peerIp`,
-      // server.ts:74)" names both, but only peerIp is what the pointer is about
-      // (ua-tracer-u1b). So the ref anchors on the first named symbol that is
-      // really code in this file AND sits inside the +-7 window; only when NO
-      // named symbol is within the window does the citation fail, naming the
-      // nearest out-of-range one. (Anchoring on the first merely-occurring
-      // symbol would let the far-away Deno.serve call that wraps the whole
-      // server steal the anchor from the peerIp that pins the line.)
-      let anchoredHere = false;
-      const outOfRange: { symbol: string; occurs: number[] }[] = [];
-      for (const symbol of symbolsIn(context)) {
-        // Only a symbol that really is code in this file can anchor anything;
-        // otherwise the word is English and says nothing about the pointer.
-        const occurs: number[] = [];
-        // Whole-identifier match, so `handler` is never "found" inside `routeHandler`.
-        const asCode = new RegExp(
-          `(?<![A-Za-z0-9_])${
-            symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-          }(?![A-Za-z0-9_])\\s*[(=:?.,\\]}){'"<>/]`,
-          "i",
-        );
-        source.forEach((sl, n) => {
-          if (asCode.test(sl)) occurs.push(n + 1);
-        });
-        if (occurs.length === 0) continue;
-        if (occurs.some((n) => n >= from - 7 && n <= to + 7)) {
-          anchoredHere = true;
-          break;
-        }
-        outOfRange.push({ symbol, occurs });
-      }
-      if (anchoredHere) anchored++;
-      else if (outOfRange.length > 0) {
-        const { symbol, occurs } = outOfRange[0];
+      // The clause's LAST code symbol decides (see citationDecision, ua-tracer-27o): a
+      // clause that names a wrapper call beside its real subject anchors on the subject,
+      // and the failure message therefore names the symbol nearest the ref (ua-tracer-ngt)
+      // rather than whichever named symbol happened to be listed first.
+      const decision = citationDecision(
+        context,
+        from,
+        to,
+        (symbol) => codeOccurrences(symbol, source),
+      );
+      if (decision.anchored) {
+        anchored++;
+      } else if (decision.anchor) {
+        const { symbol, occurs } = decision.anchor;
         failures.push(
           `${marker}:${i + 1} cites ${whole} for \`${symbol}\`, which is at ${
             file.split("/").pop()
@@ -1270,4 +1298,69 @@ Deno.test("symbolsIn reads dotted identifiers as code, prose abbreviations as pr
   want(symbolsIn("a string in HTML"), []);
   // The pre-existing codeish classes are unchanged.
   want(symbolsIn("the logHit casRetry path"), ["logHit", "casRetry"]);
+});
+
+Deno.test("symbolsIn's dotted arm holds EVERY segment to two characters, not just the last", () => {
+  // ua-tracer-dnh: the predicate's comment promised "every dot-joined segment at least two
+  // identifier characters", while the regex let a single-character segment through (the last
+  // arm was `[A-Za-z_][A-Za-z0-9_]*` for both ends). A 4+ character token such as `ab.c` clears
+  // the `tok.length < 4` floor, so nothing else excluded it.
+  const want = (got: string[], expected: string[]) => {
+    if (JSON.stringify(got) !== JSON.stringify(expected)) {
+      throw new Error(
+        `symbolsIn returned ${JSON.stringify(got)}, expected ${JSON.stringify(expected)}`,
+      );
+    }
+  };
+  want(symbolsIn("ab.c and x.yz stay prose"), []);
+  want(symbolsIn("the ab.cd.field path"), ["ab.cd.field"]);
+  // The dotted identifiers the guard exists for still anchor.
+  want(symbolsIn("`Deno.serve` and `kv.atomic` and req.url"), [
+    "Deno.serve",
+    "kv.atomic",
+    "req.url",
+  ]);
+});
+
+Deno.test("a citation anchors on the symbol nearest the ref, so a wrapper symbol cannot hide drift", () => {
+  // ua-tracer-27o: the clause below is THREAT_MODEL.md:57's, which names the Deno.serve wrapper
+  // and then peerIp. The pointer is about peerIp. Anchoring on the first named symbol inside the
+  // +-7 window meant the same citation, drifted onto a Deno.serve line, still passed - the
+  // wrapper rescued it - which is the drift this guard exists to catch.
+  const clause = "eer from `Deno.serve` info** (`peerIp`,";
+  const lines: Record<string, number[]> = { "Deno.serve": [1013], "peerIp": [74, 90] };
+  const near = (symbol: string) => lines[symbol] ?? [];
+
+  const correct = citationDecision(clause, 74, 74, near);
+  if (!correct.anchored) throw new Error("peerIp's own citation stopped anchoring");
+
+  const drifted = citationDecision(clause, 1013, 1013, near);
+  if (drifted.anchored) {
+    throw new Error("a citation drifted onto a Deno.serve line still passes (ua-tracer-27o)");
+  }
+  // ... and the message names the symbol the clause is about, so the fix is legible: the name
+  // nearest the ref (peerIp), not the first name in the clause and not the first one off-range
+  // (ua-tracer-ngt).
+  if (drifted.anchor?.symbol !== "peerIp") {
+    throw new Error(`failure would name ${drifted.anchor?.symbol}, expected peerIp`);
+  }
+
+  // A clause that names only prose anchors nothing: the ref is bounds-checked only.
+  const prose = citationDecision("request headers are redacted ", 100, 100, () => []);
+  if (prose.anchored || prose.anchor !== null) {
+    throw new Error("prose anchored a citation");
+  }
+});
+
+Deno.test("a stale citation names the symbol nearest the ref, not the first one in the clause", () => {
+  // ua-tracer-ngt: the failure message reported whichever named symbol it met FIRST, which in
+  // clause order is the one furthest from the pointer - an auditor following that name looks in
+  // the wrong part of the file. The decider is the last code symbol, so the message names it.
+  const clause = "the `casRetry` swap and then `boundRecord` ";
+  const lines: Record<string, number[]> = { casRetry: [10], boundRecord: [400] };
+  const decision = citationDecision(clause, 100, 100, (symbol) => lines[symbol] ?? []);
+  if (decision.anchored) throw new Error("a stale citation anchored");
+  if (decision.anchor?.symbol !== "boundRecord") {
+    throw new Error(`message would name ${decision.anchor?.symbol}, expected boundRecord`);
+  }
 });

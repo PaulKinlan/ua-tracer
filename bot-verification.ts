@@ -51,6 +51,17 @@ const UNVERIFIABLE_BOTS: { name: string; uaMatches: string[] }[] = [
   { name: "ChatGPT-User", uaMatches: ["ChatGPT-User"] },
 ];
 
+/**
+ * Whether a classified bot family has published CIDR ranges an address could be
+ * checked against. Callers rewriting a classification note (backfill-verified)
+ * need this: for a family with no published ranges the only truthful note is
+ * "does not publish IP ranges", and no address-provenance statement may replace
+ * it — there were never ranges to check (ua-tracer-94u).
+ */
+export function botPublishesRanges(bot: string): boolean {
+  return BOT_RANGE_SOURCES.some((s) => s.name === bot);
+}
+
 const BOT_RANGES_TTL_MS = 24 * 60 * 60 * 1000; // refresh cached ranges daily
 const BOT_RANGE_FETCH_TIMEOUT_MS = 5_000; // cold/expired lookups run on GET /
 

@@ -25,7 +25,7 @@ import {
   type TraceStats,
   uaIndexKey,
 } from "./storage.ts";
-import { type BotVerification, classifyBot } from "./bot-verification.ts";
+import { botPublishesRanges, type BotVerification, classifyBot } from "./bot-verification.ts";
 
 export interface BackfillVerifiedResult {
   scanned: number;
@@ -193,19 +193,26 @@ export async function runBackfillVerified(
       // "unverifiable", deliberately not "unverified": the address was not checked, and
       // saying "unverified" would accuse the UA of spoofing an address we never trusted.
       //
-      // The provenance note replaces the classified one UNCONDITIONALLY, even when the
-      // classification already came back 'unverifiable' (ua-tracer-505): classifyBot's
+      // The provenance note replaces the classified one even when the classification
+      // already came back 'unverifiable' (ua-tracer-505): classifyBot's
       // note describes whatever address string it was handed, which for a stored record
       // is a client claim or the "unknown" sentinel, not a peer — so its note ("client
       // address is IPv6…") is at best incomplete and at worst false, and persisting it
       // would silently drop the provenance warning this run exists to publish.
-      result = {
-        bot: classified.bot,
-        status: "unverifiable",
-        note: source === "unknown"
-          ? `no client address was recorded for this trace, so ${classified.bot} ranges could not be checked`
-          : `the recorded client address came from a forwarding header, which the client writes, so ${classified.bot} ranges were not checked against it`,
-      };
+      //
+      // One exception: a bot that publishes NO ranges (ChatGPT-User) was never going to
+      // be range-checked, so "its ranges could not be checked" would be a false claim.
+      // Its only truthful note is classifyBot's "does not publish IP ranges" one, which
+      // stays (ua-tracer-94u).
+      if (botPublishesRanges(classified.bot)) {
+        result = {
+          bot: classified.bot,
+          status: "unverifiable",
+          note: source === "unknown"
+            ? `no client address was recorded for this trace, so ${classified.bot} ranges could not be checked`
+            : `the recorded client address came from a forwarding header, which the client writes, so ${classified.bot} ranges were not checked against it`,
+        };
+      }
     }
     const label = result ? `${result.status} ${result.bot}` : "(not a bot)";
     tally.set(label, (tally.get(label) ?? 0) + 1);

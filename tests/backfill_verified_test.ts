@@ -280,6 +280,32 @@ Deno.test("the persisted note is true for a trace with no address or a claimed I
   }
 });
 
+Deno.test("a bot with no published ranges keeps its unfalsifiable note, whatever the provenance (ua-tracer-94u)", async () => {
+  await clearKv();
+  const kv = await testKv();
+  await seedBotRanges({ "Googlebot": ["66.249.64.0/19"] });
+
+  // ChatGPT-User publishes no ranges, so no address could ever be range-checked:
+  // claiming its "ranges could not be checked" would be false. The provenance
+  // substitution must leave the one truthful note alone.
+  const claimed = traceFromHeader("gptClaimed", "ChatGPT-User/1.0", "203.0.113.9");
+  const noAddr = trace("gptNoAddr", "ChatGPT-User/1.0", "unknown", TS + 1);
+  for (const t of [claimed, noAddr]) await seed(kv, t, true);
+
+  await runBackfillVerified(kv);
+  for (const t of [claimed, noAddr]) {
+    const v = (await kv.get<TraceRecord>(["trace", t.id])).value?.verified;
+    if (v?.status !== "unverifiable" || !v.note.includes("does not publish IP ranges")) {
+      throw new Error(`${t.id}: ${JSON.stringify(v)}`);
+    }
+    if (
+      v.note.includes("ranges were not checked") || v.note.includes("ranges could not be checked")
+    ) {
+      throw new Error(`${t.id}: claims ranges that do not exist: ${v.note}`);
+    }
+  }
+});
+
 Deno.test("backfill-verified skips malformed trace entries", async () => {
   await clearKv();
   const kv = await testKv();

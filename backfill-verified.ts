@@ -63,9 +63,16 @@ export interface BackfillVerifiedResult {
  */
 export type IpSource = "peer" | "claimed" | "unknown";
 
-/** Same address, however the runtime spelled it (`::ffff:1.2.3.4` is `1.2.3.4`). */
+/**
+ * Same address, however the runtime spelled it (`::ffff:1.2.3.4` is `1.2.3.4`).
+ * Case-insensitive like clientIp()/classifyBot(): the request path strips the
+ * mapped prefix from the CLAIM it stores as `ip` but the recorded header stays
+ * verbatim, so a `::FFFF:` claim must still equate with the stored `1.2.3.4` —
+ * otherwise the record mis-reads as "peer" and the backfill mints a verified
+ * badge from an address the client wrote (ua-tracer-7si).
+ */
 function sameAddress(a: string, b: string): boolean {
-  const norm = (v: string) => v.trim().replace(/^::ffff:/, "");
+  const norm = (v: string) => v.trim().replace(/^::ffff:/i, "");
   return norm(a) === norm(b);
 }
 

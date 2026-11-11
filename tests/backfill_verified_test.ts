@@ -160,6 +160,13 @@ Deno.test("storedIpSource reads provenance back out of the record", () => {
   // The runtime may spell an IPv4 peer either way on either side of the comparison.
   const mapped = withHeaders({ "x-forwarded-for": "66.249.66.9" }, "::ffff:66.249.66.9");
   if (storedIpSource(mapped) !== "claimed") throw new Error("an IPv4-mapped match was missed");
+  // Case-insensitive, like clientIp(): the stored ip is the normalised claim, the recorded
+  // header is verbatim client text — a ::FFFF: claim must still read as claimed, or the
+  // backfill would mint a verified badge from an address the client wrote (ua-tracer-7si).
+  const upperClaim = withHeaders({ "x-forwarded-for": "::FFFF:66.249.66.9" }, "66.249.66.9");
+  if (storedIpSource(upperClaim) !== "claimed") {
+    throw new Error("an uppercase-mapped claim was read as a peer address");
+  }
   // An empty header is ignored by the request path, so it cannot be the source.
   const emptyHeader = withHeaders({ "x-forwarded-for": "" }, "203.0.113.7");
   if (storedIpSource(emptyHeader) !== "peer") {
@@ -302,6 +309,30 @@ Deno.test("a bot with no published ranges keeps its unfalsifiable note, whatever
       v.note.includes("ranges were not checked") || v.note.includes("ranges could not be checked")
     ) {
       throw new Error(`${t.id}: claims ranges that do not exist: ${v.note}`);
+    }
+  }
+});
+
+Deno.test("an uppercase-mapped claimed address never earns a verified badge (ua-tracer-7si)", async () => {
+  await clearKv();
+  const kv = await testKv();
+  await seedBotRanges({ "Googlebot": ["66.249.64.0/19"] });
+
+  // Exactly what clientIp() stores for a no-peer request whose x-forwarded-for is
+  // uppercase-mapped: ip is the NORMALISED claim, the recorded header is verbatim.
+  // Whether the client capitalises its own header must not decide the badge.
+  const upper = trace("upper", GOOGLEBOT_UA, "66.249.66.7", TS + 10);
+  upper.headers = { "user-agent": GOOGLEBOT_UA, "x-forwarded-for": "::FFFF:66.249.66.7" };
+  const lower = trace("lower", GOOGLEBOT_UA, "66.249.66.7", TS + 11);
+  lower.headers = { "user-agent": GOOGLEBOT_UA, "x-forwarded-for": "::ffff:66.249.66.7" };
+  for (const t of [upper, lower]) await seed(kv, t, true);
+
+  const result = await runBackfillVerified(kv);
+  if (result.unprovenanced !== 2) throw new Error(`unprovenanced ${result.unprovenanced}`);
+  for (const id of ["upper", "lower"]) {
+    const v = (await kv.get<TraceRecord>(["trace", id])).value?.verified;
+    if (v?.status !== "unverifiable" || !v.note.includes("forwarding header")) {
+      throw new Error(`${id}: a client-written address earned ${JSON.stringify(v)}`);
     }
   }
 });

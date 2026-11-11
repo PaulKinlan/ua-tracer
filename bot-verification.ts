@@ -169,6 +169,21 @@ export async function classifyBot(
           note: `no trusted client address was available to check ${source.name} ranges`,
         };
       }
+      const ipInt = ipv4ToInt(ipNorm);
+      if (ipInt === null) {
+        // The peer is a valid address this checker cannot judge: a plain IPv6
+        // address (the IPv4-mapped ::ffff: form is normalised above). Only IPv4
+        // CIDR matching is implemented and some operators publish IPv6 ranges we
+        // do not match — calling this 'unverified' would accuse the UA of
+        // spoofing an address we never checked (tm-bot-verdict-ipv6-false-spoof,
+        // ua-tracer-917). Like the no-address case, no range fetch either: the
+        // answer cannot depend on the ranges.
+        return {
+          bot: source.name,
+          status: "unverifiable",
+          note: `client address is IPv6, not checked against ${source.name} published IPv4 ranges`,
+        };
+      }
       const ranges = await getBotRanges(source, deps);
       if (!ranges) {
         return {
@@ -177,9 +192,7 @@ export async function classifyBot(
           note: `${source.name} published ranges temporarily unavailable`,
         };
       }
-      const ipInt = ipv4ToInt(ipNorm);
-      const inRange = ipInt !== null &&
-        ranges.some((r) => r.includes(".") && cidrContains4(r, ipInt));
+      const inRange = ranges.some((r) => r.includes(".") && cidrContains4(r, ipInt));
       return {
         bot: source.name,
         status: inRange ? "verified" : "unverified",

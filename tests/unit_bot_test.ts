@@ -48,9 +48,21 @@ Deno.test("an IPv4-mapped IPv6 client IP is normalised before matching", async (
   if (v?.status !== "verified") throw new Error(JSON.stringify(v));
 });
 
-Deno.test("a plain IPv6 client IP cannot match an IPv4 range (and never verifies)", async () => {
+Deno.test("a plain IPv6 client IP is unverifiable, never a spoof verdict", async () => {
+  // tm-bot-verdict-ipv6-false-spoof (ua-tracer-917): IPv6 ranges are not matched,
+  // so the honest verdict is 'unverifiable' — 'unverified' would accuse the UA
+  // of spoofing an address that was never checked. The never-verifies invariant
+  // still holds.
   const v = await classifyBot("2001:4860:4801:1100::1", "Googlebot/2.1");
-  if (v?.status !== "unverified") throw new Error(JSON.stringify(v));
+  if (v?.status !== "unverifiable") throw new Error(JSON.stringify(v));
+  if (!v.note.includes("IPv6")) throw new Error(v.note);
+  // The IPv6 verdict fires before any range lookup: OAI-SearchBot is deliberately
+  // unseeded (the fail-closed control below), so an 'unavailable ranges' note
+  // here would mean the fetch ran first.
+  const noRanges = await classifyBot("2001:4860:4801:1100::1", "OAI-SearchBot/1.0");
+  if (noRanges?.status !== "unverifiable" || !noRanges.note.includes("IPv6")) {
+    throw new Error(JSON.stringify(noRanges));
+  }
 });
 
 Deno.test("UA matching is case-insensitive", async () => {

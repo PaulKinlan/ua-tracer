@@ -7,7 +7,7 @@
 
     "fmt:check": "deno fmt --check --ignore=artifacts --ignore=.beads --ignore=.dolt --ignore=.beads-credential-key",
     "lint:check": "deno lint --ignore=artifacts --ignore=.beads --ignore=.dolt --ignore=.beads-credential-key",
-    "typecheck": "deno check --unstable-kv *.ts tests/*.ts",
+    "typecheck": "deno check --unstable-kv $(git ls-files '*.ts')",
     "check:all": "deno task fmt:check && deno task lint:check && deno task typecheck",
 
     "test:file": "deno test --unstable-kv --allow-env",

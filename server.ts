@@ -594,15 +594,18 @@ async function handleHomepage(
 
     try {
       await seedTrace(rec, seedStats);
-      // Also log the homepage itself as a hit so the trace waterfall has a root.
+    } catch {
+      // The seed atomic may already have committed before a later aggregate
+      // update failed. Do not claim the trace row is absent (ua-tracer-6zl).
+      console.warn(`[homepage] could not complete seed for trace ${id}; storage may be incomplete`);
+    }
+    // The root hit has a separate write. Its failure must not be reported as a
+    // seed failure; still attempt it if the seed failed so the visit can be
+    // recorded when one of the writes remains available.
+    try {
       await logHit({ id, kind: "homepage", ts, ua, ip, method: req.method, headers });
     } catch {
-      // Minting is best-effort at the storage layer: seedTrace bounds the record
-      // itself (ua-tracer-dpb), so what can still fail here is KV being down or
-      // refusing the write. The page must still serve — degraded, with the trace
-      // missing from the store — rather than 500. Keep untrusted values (ua,
-      // headers, claimed ip) out of the warning; the id is server-minted.
-      console.warn(`[homepage] failed to seed trace ${id}; serving page without a stored trace`);
+      console.warn(`[homepage] could not store root hit for trace ${id}; seed may still exist`);
     }
 
     console.log(`[homepage] trace=${id} ip=${ip} ua="${ua.slice(0, 80)}"`);

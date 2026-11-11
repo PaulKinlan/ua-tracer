@@ -993,7 +993,15 @@ async function routeHandler(req: Request, info?: Deno.ServeHandlerInfo): Promise
 // broken signal. We route the request through the normal handler (so it still
 // gets the full set of response headers) and then drop the body.
 export async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
-  const res = await routeHandler(req, info);
+  let res: Response;
+  try {
+    res = await routeHandler(req, info);
+  } catch (err) {
+    // I6: a thrown route must never escape as Deno's default error response,
+    // which carries none of the baseline security headers (ua-tracer-uct).
+    console.error("routeHandler threw:", err);
+    res = new Response("Internal Server Error", { status: 500 });
+  }
   securityHeaders(res.headers);
   if (req.method === "HEAD") {
     return new Response(null, { status: res.status, headers: res.headers });

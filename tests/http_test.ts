@@ -13,6 +13,7 @@ import {
   testKv,
   traceBaseFromHtml,
   traceIdFromSetCookie,
+  withClosedKv,
 } from "./testenv.ts";
 import {
   boundTiming,
@@ -452,6 +453,36 @@ Deno.test("every response exit applies defensive headers without changing route 
     throw new Error("security baseline overrode favicon caching");
   }
   await favicon.body?.cancel();
+});
+
+Deno.test("a route-level throw still returns a 500 carrying the full security baseline", async () => {
+  await clearKv();
+  const expected = {
+    "content-security-policy": "default-src 'self'",
+    "strict-transport-security": "max-age=63072000; includeSubDomains",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "x-frame-options": "SAMEORIGIN",
+    "permissions-policy": "camera=()",
+  };
+  // Closing the in-memory KV makes the next route-level KV op throw the way a
+  // dead KV does in production (ua-tracer-uct); withClosedKv restores the cache
+  // afterwards so the rest of the suite is unaffected.
+  await withClosedKv(async () => {
+    for (const method of ["GET", "HEAD"] as const) {
+      const res = await handler(req("/", { method }), connInfo(IP));
+      if (res.status !== 500) throw new Error(`${method}: status ${res.status}`);
+      for (const [name, value] of Object.entries(expected)) {
+        if (!res.headers.get(name)?.includes(value)) {
+          throw new Error(`${method}: missing ${name} (${res.headers.get(name)})`);
+        }
+      }
+      if (method === "HEAD" && (await res.text()) !== "") {
+        throw new Error("HEAD returned a body");
+      }
+      await res.body?.cancel();
+    }
+  });
 });
 
 Deno.test("HEAD returns the GET headers with an empty body", async () => {

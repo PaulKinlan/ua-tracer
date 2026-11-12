@@ -635,7 +635,9 @@ Deno.test("an oversized ?ua= filter 200s with a no-match page instead of throwin
     const res = await handler(req(path));
     if (res.status !== 200) throw new Error(`${path.slice(0, 20)}… -> ${res.status}, want 200`);
     const html = await res.text();
-    if (html.includes("Internal Server Error")) throw new Error(`${path.slice(0, 20)}… returned the 500 page`);
+    if (html.includes("Internal Server Error")) {
+      throw new Error(`${path.slice(0, 20)}… returned the 500 page`);
+    }
   }
   // A within-bounds filter still works: it finds a trace minted with that UA.
   const ua = "FilterBot/9.1";

@@ -82,10 +82,11 @@ Actors:
 ### 4.1 Claimed User-Agent (header; any bytes)
 
 - Recorded on every trace/hit (server.ts:322, storage.ts:98), and on each hit (storage.ts:151);
-  indexed as a KV key segment via `normUa` (storage.ts:204) — so it is **length-bounded before
-  write** (`MAX_TRACE_UA_CHARS = 200`, storage.ts:279; applied by `boundSeedRecord` storage.ts:304
-  and `boundRecord` storage.ts:394). An unbounded UA once broke the atomic on the key-size limit
-  (ua-tracer-dpb shape).
+  indexed as a KV key segment via `normUa` (storage.ts:212), which caps the segment itself
+  (`MAX_TRACE_UA_CHARS = 200`, storage.ts:293) so a client-supplied lookup filter (`?ua=`,
+  ua-tracer-72c) cannot mint an oversized key either; the stored field is also bounded before write
+  (`boundSeedRecord` storage.ts:312, `boundRecord` storage.ts:402). An unbounded UA once broke the
+  atomic on the key-size limit (ua-tracer-dpb shape).
 - Rendered on every public page only through `escapeHtml` (views.ts:53) — attribute-safe (`"`, `'`
   escaped) in `title=` attributes and `<a>` hrefs that use `encodeURIComponent`.
 - Drives bot classification by case-insensitive substring match (bot-verification.ts:173, 226): a
@@ -163,8 +164,8 @@ Actors:
   (storage.ts:61-71), stored lowercase (ua-tracer-t8v/bns). `tests/gate_mapping_test.ts` fails if a
   reserved name is written as a literal outside tests.
 - Long header values are truncated (4096 chars, storage.ts:374) and the whole record is kept under
-  `MAX_RECORD_BYTES` (48 KiB, storage.ts:279) with loud, non-fatal degradation (`boundRecord`,
-  storage.ts:394; `storeRecordAlone`, storage.ts:586) so a KV rejection can never escape as a 500
+  `MAX_RECORD_BYTES` (48 KiB, storage.ts:287) with loud, non-fatal degradation (`boundRecord`,
+  storage.ts:402; `storeRecordAlone`, storage.ts:594) so a KV rejection can never escape as a 500
   (ua-tracer-emp, ua-tracer-6zl).
 
 ### 4.7 Stored corpus rendered publicly (stored-XSS surface)
@@ -192,9 +193,9 @@ Actors:
 - Every `GET /` mints a trace and every asset hit writes a record; there is no rate limit. The
   cookie-reuse path (4.4) caps one human browser's pollution. Per-record bounds (4.5, 4.6) cap the
   cost of any single write; listing endpoints are bounded scans (`recentTraces(200)`,
-  `recentProbes(400)`; `searchTracesByUa` collects ≤2000, storage.ts:730-732).
-- Counter updates use deadline-bounded compare-and-set (`casRetry`, storage.ts:261, 2 s budget) plus
-  a single-transaction record+increment fold (`commitHit`, storage.ts:470), so concurrent hits
+  `recentProbes(400)`; `searchTracesByUa` collects ≤2000, storage.ts:740-742).
+- Counter updates use deadline-bounded compare-and-set (`casRetry`, storage.ts:269, 2 s budget) plus
+  a single-transaction record+increment fold (`commitHit`, storage.ts:478), so concurrent hits
   cannot silently lose counts; losses degrade loudly and are repairable by `deno task backfill`
   (storage.ts:390-400 comment chain; ua-tracer-3re, -plx, -6sn).
 
@@ -213,7 +214,7 @@ evidence namespace, three times for address normalisation).
 | Verdict minted from a forwarding header                | `6032598` (ua-tracer-8i2); backfill re-publishing stored client IPs `ed2d342` (ua-tracer-4c9)                                                                                                   | `peerIp`-only verdicts (server.ts:74); `storedIpSource` provenance re-tagging (backfill-verified.ts:94)                                                                          |
 | Verdict falsehood from unchecked addresses             | `6041a17` ("unknown" → spoof), `c627bd1` (ua-tracer-917 IPv6 peer), `c3625c7` (ua-tracer-505), ua-tracer-94u (unfalsifiable bots)                                                               | fail-closed `unverifiable` branches (bot-verification.ts:163-225)                                                                                                                |
 | Case/normalisation drift (`::FFFF:`, header spellings) | ua-tracer-5k6, then the third copy regressed as ua-tracer-7si (`9df9b9e`)                                                                                                                       | `unmapIpv4` case-insensitive (server.ts:67); `sameAddress` (backfill-verified.ts:74)                                                                                             |
-| Reserved evidence name forged from the wire            | ua-tracer-0l9 (`d6f730c`); bypassed by new write paths → ua-tracer-egg (`d1e90d8`); mixed-case slip ua-tracer-fm6/t8v (`b7d1b0a`, `6beecc6`); bare truncation literal ua-tracer-4dh (`d43a4db`) | `EVIDENCE_KEYS` (storage.ts:44-58, 65) + `clientHeaders` (storage.ts:85) + `withEvidence` at the write (storage.ts:652); guard tests                                             |
+| Reserved evidence name forged from the wire            | ua-tracer-0l9 (`d6f730c`); bypassed by new write paths → ua-tracer-egg (`d1e90d8`); mixed-case slip ua-tracer-fm6/t8v (`b7d1b0a`, `6beecc6`); bare truncation literal ua-tracer-4dh (`d43a4db`) | `EVIDENCE_KEYS` (storage.ts:44-58, 65) + `clientHeaders` (storage.ts:85) + `withEvidence` at the write (storage.ts:660); guard tests                                             |
 | Stored XSS / reflection                                | ua-tracer-4p0 (P1, `368d463`: unescaped `initiatorType`, forwarded host poisoning og/twitter meta); ua-tracer-82v (`d981466`: crafted `/r/` segment reflected as text/css)                      | `escapeHtml` everywhere (views.ts:53); canonical/og meta URLs from `CANONICAL_ORIGIN` (views.ts:433, 599-600); `PROBE_SEGMENT` (server.ts:301) + `cssSafeSegment` (probes.ts:22) |
 | Credential disclosure via stored headers               | ua-tracer-780 (P2, `7e28686`: Authorization/Cookie persisted and rendered)                                                                                                                      | redaction at ingest, at write, and re-applied on read (storage.ts:22-31)                                                                                                         |
 | Unbounded unauthenticated writes / enumeration         | ua-tracer-0l8 (`97b0e6f`: orphan hits for unknown traces); ua-tracer-9v6 (wrong secret writes nothing)                                                                                          | unknown-trace probes serve but persist nothing (server.ts:411-417); indistinguishable 404s (server.ts:325-347); per-trace secret `5f5a472`                                       |

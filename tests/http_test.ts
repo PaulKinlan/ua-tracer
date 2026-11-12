@@ -621,6 +621,33 @@ Deno.test("an oversized /trace/{id} 404s instead of throwing on an oversized KV 
   if (await countPrefix(["trace"]) !== 0) throw new Error("a rejected trace id wrote to KV");
 });
 
+// ua-tracer-72c: the ?ua= query filter reaches a KV key through searchTracesByUa
+// (uaAggKey / the ["ua", normUa] prefix), and the 6v1 PROBE_SEGMENT guard covers
+// only path segments. An oversized filter used to make kv.get throw "Key too
+// large", which the handler catch turned into a 500; it must be a clean 200 with
+// an empty list, like any filter that matches nothing. Both pages that take the
+// filter are exercised. Mutation check: remove the slice in normUa and both
+// requests 500 instead of 200.
+Deno.test("an oversized ?ua= filter 200s with a no-match page instead of throwing on a KV key", async () => {
+  await clearKv();
+  const oversized = encodeURIComponent("A".repeat(3000));
+  for (const path of [`/traces?ua=${oversized}`, `/?ua=${oversized}`]) {
+    const res = await handler(req(path));
+    if (res.status !== 200) throw new Error(`${path.slice(0, 20)}… -> ${res.status}, want 200`);
+    const html = await res.text();
+    if (html.includes("Internal Server Error")) {
+      throw new Error(`${path.slice(0, 20)}… returned the 500 page`);
+    }
+  }
+  // A within-bounds filter still works: it finds a trace minted with that UA.
+  const ua = "FilterBot/9.1";
+  await mint(ua);
+  const res = await handler(req(`/traces?ua=${encodeURIComponent(ua)}`));
+  if (res.status !== 200) throw new Error(`bounded filter -> ${res.status}`);
+  const html = await res.text();
+  if (!html.includes(ua)) throw new Error("bounded ?ua= filter lost its match");
+});
+
 Deno.test("a method a read-only route does not serve is 405 with Allow, and writes nothing", async () => {
   await clearKv();
   const { id, secret } = await mint();

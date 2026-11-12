@@ -198,11 +198,19 @@ export function recentIndexKey(ts: number, id: string): [string, string, string]
   return ["recent", reverseKey, id];
 }
 
-// Normalised UA used as a key segment. Lowercased so ?ua= searches are
+// Normalised UA used as a KEY SEGMENT. Lowercased so ?ua= searches are
 // case-insensitive against the index. Empty UA collapses to a sentinel so it
-// still groups into a stable bucket.
+// still groups into a stable bucket. The segment is length-capped because it
+// becomes a KV key part for READERS as well as writers: a writer's UA is
+// already bounded (MAX_TRACE_UA_CHARS), but the ?ua= query filter is
+// client-supplied and unbounded, and it reaches uaAggKey/uaIndexKey through
+// searchTracesByUa — an oversized filter made kv.get throw "Key too large",
+// surfacing as a 500 on /traces?ua=… (ua-tracer-72c, the query-string variant
+// of ua-tracer-6v1's path-segment bug). Capping here, at the one place the
+// segment is minted, bounds every key derived from a UA. A filter longer than
+// any stored UA can never substring-match anyway, so nothing is lost.
 export function normUa(ua: string): string {
-  const t = (ua || "").trim().toLowerCase();
+  const t = (ua || "").trim().toLowerCase().slice(0, MAX_TRACE_UA_CHARS);
   return t || "(no user-agent)";
 }
 

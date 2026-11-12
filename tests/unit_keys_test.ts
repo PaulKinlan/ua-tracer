@@ -5,12 +5,28 @@
 // newest-first ordering that the pages assume.
 
 import { clearKv, testKv } from "./testenv.ts";
-import { normUa, recentIndexKey, type TraceStats, uaAggKey, uaIndexKey } from "../storage.ts";
+import { MAX_TRACE_UA_CHARS, normUa, recentIndexKey, type TraceStats, uaAggKey, uaIndexKey } from "../storage.ts";
 
 Deno.test("normUa lowercases, trims, and buckets an empty UA", () => {
   if (normUa("  Mozilla/5.0  ") !== "mozilla/5.0") throw new Error(normUa("  Mozilla/5.0  "));
   if (normUa("") !== "(no user-agent)") throw new Error(normUa(""));
   if (normUa("   ") !== "(no user-agent)") throw new Error(normUa("   "));
+});
+
+// ua-tracer-72c: normUa mints a KV key segment, and readers (searchTracesByUa
+// via ?ua=) feed it client-supplied strings. The segment must be capped at the
+// same bound the write side applies, or an oversized filter makes kv.get throw
+// "Key too large". Mutation check: drop the slice in normUa and the oversized
+// assertion fails.
+Deno.test("normUa caps the key segment at MAX_TRACE_UA_CHARS", () => {
+  const capped = normUa("A".repeat(5000));
+  if (capped !== "a".repeat(MAX_TRACE_UA_CHARS)) {
+    throw new Error(`normUa segment length ${capped.length}, want ${MAX_TRACE_UA_CHARS}`);
+  }
+  if (uaAggKey("A".repeat(5000))[1] !== capped) throw new Error("uaAggKey did not inherit the cap");
+  // A stored-length UA is untouched by the cap.
+  const normal = "x".repeat(MAX_TRACE_UA_CHARS);
+  if (normUa(normal) !== normal) throw new Error("normUa truncated a within-bounds UA");
 });
 
 Deno.test("index keys carry their reverse-timestamp segment in a fixed width", () => {

@@ -626,19 +626,42 @@ Deno.test("an oversized /trace/{id} 404s instead of throwing on an oversized KV 
 // only path segments. An oversized filter used to make kv.get throw "Key too
 // large", which the handler catch turned into a 500; it must be a clean 200 with
 // an empty list, like any filter that matches nothing. Both pages that take the
-// filter are exercised. Mutation check: remove the slice in normUa and both
-// requests 500 instead of 200.
+// filter are exercised, with a seeded NON-matching trace in the corpus so a
+// filter-ignoring implementation (200 + every trace listed) fails too, not just
+// a throwing one (ua-tracer-2yj). Mutation checks: remove the slice in normUa
+// and both requests 500 instead of 200; make handleTraces ignore uaFilter and
+// the no-match/seeded-absence assertions fail.
 Deno.test("an oversized ?ua= filter 200s with a no-match page instead of throwing on a KV key", async () => {
   await clearKv();
+  const seeded = "MismatchBot/3.3";
+  await mint(seeded);
   const oversized = encodeURIComponent("A".repeat(3000));
-  for (const path of [`/traces?ua=${oversized}`, `/?ua=${oversized}`]) {
-    const res = await handler(req(path));
-    if (res.status !== 200) throw new Error(`${path.slice(0, 20)}… -> ${res.status}, want 200`);
-    const html = await res.text();
-    if (html.includes("Internal Server Error")) {
-      throw new Error(`${path.slice(0, 20)}… returned the 500 page`);
-    }
+
+  const traces = await handler(req(`/traces?ua=${oversized}`));
+  if (traces.status !== 200) throw new Error(`/traces?ua=… -> ${traces.status}, want 200`);
+  const tracesHtml = await traces.text();
+  if (tracesHtml.includes("Internal Server Error")) {
+    throw new Error("/traces?ua=… returned the 500 page");
   }
+  if (!tracesHtml.includes("No homepage requests match")) {
+    throw new Error("/traces?ua=… did not render the no-match state");
+  }
+  if (tracesHtml.includes(seeded)) {
+    throw new Error("/traces?ua=… listed a trace the filter excludes");
+  }
+
+  const home = await handler(req(`/?ua=${oversized}`));
+  if (home.status !== 200) throw new Error(`/?ua=… -> ${home.status}, want 200`);
+  const homeHtml = await home.text();
+  if (homeHtml.includes("Internal Server Error")) {
+    throw new Error("/?ua=… returned the 500 page");
+  }
+  // The homepage leaderboard is deliberately unfiltered, so only the filtered
+  // list's empty state — not UA absence — is asserted here.
+  if (!homeHtml.includes("No homepage requests match user-agent filter")) {
+    throw new Error("/?ua=… did not render the no-match state");
+  }
+
   // A within-bounds filter still works: it finds a trace minted with that UA.
   const ua = "FilterBot/9.1";
   await mint(ua);

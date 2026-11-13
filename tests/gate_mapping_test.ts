@@ -1323,9 +1323,9 @@ async function auditCitations(
       if (decision.anchor) {
         const { symbol, occurs } = decision.anchor;
         audit.failures.push(
-          `${marker}:${at} cites ${whole} for \`${symbol}\`, which is at ${
-            file.split("/").pop()
-          }:${occurs.slice(0, 3).join("/")} — re-derive the number`,
+          `${marker}:${at} cites ${whole} for \`${symbol}\`, which is at ${file.split("/").pop()}:${
+            occurs.slice(0, 3).join("/")
+          } — re-derive the number`,
         );
         continue;
       }

@@ -144,12 +144,12 @@ Actors:
 ### 4.2 Claimed addresses: `x-forwarded-for`, `x-real-ip`
 
 - Deno Deploy sets no forwarding header of its own; a client-supplied `x-forwarded-for` arrives
-  verbatim (`clientIp`, server.ts:82-87 comment, measured live 2026-10-13). So:
+  verbatim (`clientIp`, server.ts:82-89 comment, measured live 2026-10-13). So:
   - `clientIp` (server.ts:89) prefers the **connection peer**; claimed headers are recorded only
     when no peer exists, and then only as **recorded context, never verdict input**.
   - Verdicts use `peerIp(info)` exclusively: `classifyBot` is called with the peer address
     (server.ts:581); it documents `ip` must be the trusted connection peer, and that a missing peer
-    is `unverifiable`, never evidence of spoofing (`classifyBot`, bot-verification.ts:156-161).
+    is `unverifiable`, never evidence of spoofing (`classifyBot`, bot-verification.ts:156-163).
   - `backfill-verified.ts` refuses to republish `verified` for a stored trace whose IP matches a
     forwarding header in its own recorded headers (`storedIpSource`, backfill-verified.ts:94-105;
     case-insensitive compare via `sameAddress`, backfill-verified.ts:74, ua-tracer-4c9 and 9df9b9e)
@@ -189,7 +189,7 @@ Actors:
 
 - The **read** is bounded first (`readBoundedBody`, server.ts:161; 32 KiB, below KV's 64 KiB value
   cap; declared-length refused pre-read, streaming abandoned mid-read → `413` (`payloadTooLarge`,
-  server.ts:203-208). An over-limit post costs the payload, never the probe record (ua-tracer-0ms).
+  server.ts:200-208). An over-limit post costs the payload, never the probe record (ua-tracer-0ms).
 - `boundTiming` (server.ts:260) projects each attacker-shaped timing entry onto six known fields
   with per-field char caps and drops/truncates the rest, reporting the truncation into the reserved
   evidence namespace (`timingTruncated` evidence key, server.ts:382; the literal
@@ -262,7 +262,7 @@ evidence namespace, three times for address normalisation).
 | Verdict minted from a forwarding header                | `6032598` (ua-tracer-8i2); backfill re-publishing stored client IPs `ed2d342` (ua-tracer-4c9)                                                                                                   | `peerIp`-only verdicts (server.ts:74); `storedIpSource` provenance re-tagging (backfill-verified.ts:94)                                                                                                      |
 | Verdict falsehood from unchecked addresses             | `6041a17` ("unknown" → spoof), `c627bd1` (ua-tracer-917 IPv6 peer), `c3625c7` (ua-tracer-505), ua-tracer-94u (unfalsifiable bots)                                                               | fail-closed `unverifiable` branches (bot-verification.ts:163-225)                                                                                                                                            |
 | Case/normalisation drift (`::FFFF:`, header spellings) | ua-tracer-5k6, then the third copy regressed as ua-tracer-7si (`9df9b9e`)                                                                                                                       | `unmapIpv4` case-insensitive (server.ts:67); `sameAddress` (backfill-verified.ts:74)                                                                                                                         |
-| Reserved evidence name forged from the wire            | ua-tracer-0l9 (`d6f730c`); bypassed by new write paths → ua-tracer-egg (`d1e90d8`); mixed-case slip ua-tracer-fm6/t8v (`b7d1b0a`, `6beecc6`); bare truncation literal ua-tracer-4dh (`d43a4db`) | `EVIDENCE_KEYS` (storage.ts:44-58, 65) + `clientHeaders` (storage.ts:85) + `withEvidence` at the write (storage.ts:660); guard tests                                                                         |
+| Reserved evidence name forged from the wire            | ua-tracer-0l9 (`d6f730c`); bypassed by new write paths → ua-tracer-egg (`d1e90d8`); mixed-case slip ua-tracer-fm6/t8v (`b7d1b0a`, `6beecc6`); bare truncation literal ua-tracer-4dh (`d43a4db`) | `EVIDENCE_KEYS` (storage.ts:44-65) + `clientHeaders` (storage.ts:85) + `withEvidence` at the write (storage.ts:660); guard tests                                                                             |
 | Stored XSS / reflection                                | ua-tracer-4p0 (P1, `368d463`: unescaped `initiatorType`, forwarded host poisoning og/twitter meta); ua-tracer-82v (`d981466`: crafted `/r/` segment reflected as text/css)                      | `escapeHtml` everywhere (views.ts:53); canonical/og meta URLs from `CANONICAL_ORIGIN` (views.ts:433, 599-600); `PROBE_SEGMENT` (server.ts:301) + `cssSafeSegment` (probes.ts:22)                             |
 | Credential disclosure via stored headers               | ua-tracer-780 (P2, `7e28686`: Authorization/Cookie persisted and rendered)                                                                                                                      | redaction at ingest, at write, and re-applied on read (`SENSITIVE_HEADER_NAME`, storage.ts:22-31)                                                                                                            |
 | Unbounded unauthenticated writes / enumeration         | ua-tracer-0l8 (`97b0e6f`: orphan hits for unknown traces); ua-tracer-9v6 (wrong secret writes nothing)                                                                                          | unknown-trace probes serve but persist nothing (`logHit`, server.ts:411-417); indistinguishable 404s (`storedSecret`, server.ts:325-347); per-trace secret `5f5a472`                                         |
@@ -319,7 +319,7 @@ requests as well.
 - **Claimed forwarding addresses are stored and shown as data** (never verdict input). Storing
   attacker-chosen text in a clearly-labelled field is intentional.
 - **IPv6 peers are not range-matched** (verdict `unverifiable`, not "spoofed"): known, documented
-  limitation (`ipv4ToInt`, bot-verification.ts:186-199), fixed shape referenced as
+  limitation (`ipv4ToInt`, bot-verification.ts:185-199), fixed shape referenced as
   `tm-bot-verdict-ipv6-false-spoof`.
 - **Inline `<style>` + `style-src 'unsafe-inline'`** for page chrome, and `img-src 'self' data:` in
   the enforced baseline: deliberate, narrow, reviewed here so scanners don't re-flag them.

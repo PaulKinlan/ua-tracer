@@ -1200,6 +1200,7 @@ function citationDecision(
   from: number,
   to: number,
   occursIn: (symbol: string) => number[],
+  slack = 7,
 ): { anchored: boolean; anchor: { symbol: string; occurs: number[] } | null } {
   let anchor: { symbol: string; occurs: number[] } | null = null;
   for (const symbol of symbolsIn(context)) {
@@ -1208,7 +1209,7 @@ function citationDecision(
     if (occurs.length) anchor = { symbol, occurs };
   }
   if (!anchor) return { anchored: false, anchor: null };
-  return { anchored: anchor.occurs.some((n) => n >= from - 7 && n <= to + 7), anchor };
+  return { anchored: anchor.occurs.some((n) => n >= from - slack && n <= to + slack), anchor };
 }
 
 /**
@@ -1312,11 +1313,17 @@ async function auditCitations(
       const clauseEnd = previous && previous.index !== undefined
         ? previous.index + previous[0].length
         : 0;
+      // A RANGE gets no slack: the symbol must be code inside the lines the doc cites, not merely
+      // seven lines away from them, or `(server.ts:934-961)` can be narrowed to
+      // `(server.ts:934-945)` and still pass with `repairHealth` at :951 (ua-tracer-k8t). A single
+      // line keeps the +-7 tolerance, because a citation legitimately points at a call site whose
+      // definition is a few lines away.
       const decision = citationDecision(
         sentence.slice(clauseEnd),
         from,
         to,
         (symbol) => codeOccurrences(symbol, source),
+        from === to ? 7 : 0,
       );
       if (decision.anchored) {
         audit.symbolAnchored++;
@@ -1434,6 +1441,12 @@ Deno.test("a drifted citation is refused, including the two drifts that used to 
       from: "(`repairHealth`, server.ts:934-961)",
       to: "(`repairHealth`, server.ts:934)",
       expect: /cites server\.ts:934 for `repairHealth`, which is at server\.ts:46\/951/,
+    },
+    {
+      name: "range narrowed by 16 lines, keeping the symbol within 7 of the new end (k8t round 2)",
+      from: "(`repairHealth`, server.ts:934-961)",
+      to: "(`repairHealth`, server.ts:934-945)",
+      expect: /cites server\.ts:934-945 for `repairHealth`, which is at server\.ts:46\/951/,
     },
   ];
   for (const c of cases) {

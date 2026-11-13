@@ -29,8 +29,8 @@ JS?". It is a single Deno Deploy app (live at uatracer.com):
   request path.
 - Two things drive a real browser over CDP, and the difference is the origin they point at:
   `tools/prod-probe-loop.ts` is aimed at the live deployment, while `tests/browser_journey_test.ts`
-  (the full gate's acceptance journey) is hermetic — a local Chrome against an in-process server
-  over `:memory:` KV. Both are accounted for as boundaries in section 3.
+  (the full gate's acceptance journey) points only at this process — a local Chrome against the
+  handler this process serves over `:memory:` KV. Both are accounted for as boundaries in section 3.
 - No authentication, no accounts, no admin surface: every endpoint is public by design and the
   recorded corpus is public. There are no user secrets in the system (credential-shaped request
   headers are redacted before storage (`SENSITIVE_HEADER_NAME`, storage.ts:22-31).
@@ -56,14 +56,14 @@ in-process handler on 127.0.0.1 ──► :memory: KV (never production)
 
 Actors:
 
-| Actor                                                             | Trust                        | Notes                                                                                                           |
-| ----------------------------------------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Anonymous client                                                  | **Untrusted**                | Chooses UA, headers, cookies, URL path, POST bodies.                                                            |
-| Crawling UA's browser                                             | **Untrusted**                | Executes first-party probe JS we serve; its reports/timings are client-authored data.                           |
-| Bot-range feed operators (Google, OpenAI, Bing, Anthropic, Apple) | Trusted for verdict _inputs_ | Pinned HTTPS URLs (`BOT_RANGE_SOURCES`, bot-verification.ts:11-49); their data decides `verified`.              |
-| Deno Deploy runtime                                               | Trusted infrastructure       | `info?.remoteAddr` (the connection peer) is the only address nobody can forge (server.ts:74-86).                |
-| Operator (Paul)                                                   | Trusted                      | Runs the backfill CLIs, the prod-probe-loop harness and deploys; holds KV credentials.                          |
-| Test harness (full tier)                                          | Trusted, local only          | Spawns its own Chrome, dials it over loopback CDP, and can only reach the in-process handler and `:memory:` KV. |
+| Actor                                                             | Trust                        | Notes                                                                                                            |
+| ----------------------------------------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Anonymous client                                                  | **Untrusted**                | Chooses UA, headers, cookies, URL path, POST bodies.                                                             |
+| Crawling UA's browser                                             | **Untrusted**                | Executes first-party probe JS we serve; its reports/timings are client-authored data.                            |
+| Bot-range feed operators (Google, OpenAI, Bing, Anthropic, Apple) | Trusted for verdict _inputs_ | Pinned HTTPS URLs (`BOT_RANGE_SOURCES`, bot-verification.ts:11-49); their data decides `verified`.               |
+| Deno Deploy runtime                                               | Trusted infrastructure       | `info?.remoteAddr` (the connection peer) is the only address nobody can forge (server.ts:74-86).                 |
+| Operator (Paul)                                                   | Trusted                      | Runs the backfill CLIs, the prod-probe-loop harness and deploys; holds KV credentials.                           |
+| Test harness (full tier)                                          | Trusted, local only          | Spawns its own Chrome, dials it over loopback CDP, and navigates only the in-process handler over `:memory:` KV. |
 
 ## 3. Explicitly trusted (non-threats — do not flag these)
 
@@ -100,18 +100,21 @@ Actors:
   (`ARTIFACT_DIR`, tools/prod-probe-loop.ts:43); the target origin defaults to the production site,
   overridable with `--origin`/`PROD_ORIGIN` (tools/prod-probe-loop.ts:41), so a run creates real,
   ordinary traffic in the public corpus — exactly why it stays on demand and out of every gate tier.
-- **`tests/browser_journey_test.ts` — the hermetic browser/CDP boundary** (full tier, or a delta
-  touching it: docs/speed.md:106). It is the repo's second Chrome-over-CDP driver and the one that
-  never points at production: it spawns a local Chrome on a loopback endpoint
-  (`--remote-debugging-port=0`, tests/browser_journey_test.ts:131), dials the socket the browser
-  prints to stderr (the `DevTools listening on` line parsed into `wsUrl`,
+- **`tests/browser_journey_test.ts` — the browser/CDP boundary that only ever points at this
+  process** (full tier, or a delta touching it: docs/speed.md:106). It is the repo's second
+  Chrome-over-CDP driver and the one that never points at production: it spawns a local Chrome on a
+  loopback endpoint (`--remote-debugging-port=0`, tests/browser_journey_test.ts:131), dials the
+  socket the browser prints to stderr (the `DevTools listening on` line parsed into `wsUrl`,
   tests/browser_journey_test.ts:149), and evaluates probe JS in the page (`Runtime.evaluate`,
   tests/browser_journey_test.ts:223) against a server running in-process on 127.0.0.1, with the
   in-memory KV that test harness setup pins (`getKv`, tests/testenv.ts:20), a throwaway profile and
-  `finally` teardown. No production KV, no public origin and no credential is reachable from it, so
-  its CDP session is test output, not a production surface: the same CDP mechanism as the harness
-  above, a different origin. It is the only other place in the repo where a browser runs, and the
-  fast tier never starts one.
+  `finally` teardown. What keeps it off production is the itinerary, not a sandbox: the only page it
+  navigates and asserts against is that in-process origin (`Page.navigate`,
+  tests/browser_journey_test.ts:208), and no production KV or credential is in play (ua-tracer-zev).
+  The task holds `--allow-net` (deno.json:17) and Chrome runs without an egress restriction, so a
+  future edit could leave loopback. Its CDP session is test output, not a production surface: the
+  same CDP mechanism as the harness above, a different origin. It is the only other place in the
+  repo where a browser runs, and the fast tier never starts one.
 - **`/api/health` disclosures** (server.ts:934-961): build id, repair schedule state, timestamps —
   deliberately non-secret deploy-verification signals.
 - **Probe assets served for unknown traces** (`logHit`, server.ts:411-417): serving a static asset

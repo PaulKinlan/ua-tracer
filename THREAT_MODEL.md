@@ -2,12 +2,12 @@
 
 Bootstrapped from the code at `2932de4`, refs re-derived against `4a7888c` (2026-11-11). Every claim
 below is grounded in the current source with `file:line` refs, and the refs are checked: a guard in
-`tests/gate_mapping_test.ts` fails if a cited line leaves its file or if a backticked symbol on that
-line is no longer beside the citation, so drift surfaces as a red gate rather than as a stale
-pointer. Update this file whenever a trust boundary, input surface or mitigation moves. The guarded
-counterpart to the product description in [README.md](README.md); gate mechanics live in
-[docs/speed.md](docs/speed.md); AGENTS.md's "Request invariants" states the same contract in prose
-for lanes.
+`tests/gate_mapping_test.ts` fails if a cited line leaves its file, if a cited range no longer
+contains the symbol its sentence names, or if a single-line citation's named symbol is no longer
+beside it - so drift surfaces as a red gate rather than as a stale pointer. Update this file
+whenever a trust boundary, input surface or mitigation moves. The guarded counterpart to the product
+description in [README.md](README.md); gate mechanics live in [docs/speed.md](docs/speed.md);
+AGENTS.md's "Request invariants" states the same contract in prose for lanes.
 
 ## 1. System overview
 

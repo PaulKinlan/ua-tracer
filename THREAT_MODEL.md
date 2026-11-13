@@ -22,8 +22,10 @@ JS?". It is a single Deno Deploy app (live at uatracer.com):
 - `bot-verification.ts` classifies claimed bots against operator-published CIDR ranges.
 - `views.ts` renders all HTML; `probes.ts` generates the probe asset bodies.
 - `crons.ts` registers an hourly snapshot-repair pass; `backfill.ts` / `backfill-verified.ts` are
-  operator-run maintenance CLIs; `deploy-check.ts` is an operator-run deploy probe. Nothing imports
-  these from the request path.
+  operator-run maintenance CLIs; `deploy-check.ts` is an operator-run deploy probe;
+  `tools/prod-probe-loop.ts` is an operator-run, on-demand harness that drives a real headless
+  Chrome against the live site (in no gate tier — see section 3). Nothing imports these from the
+  request path.
 - No authentication, no accounts, no admin surface: every endpoint is public by design and the
   recorded corpus is public. There are no user secrets in the system (credential-shaped request
   headers are redacted before storage, storage.ts:22-31).
@@ -39,7 +41,7 @@ Deno Deploy edge ──► handler/routeHandler (server.ts:922,1051) ──► D
         │                    ├─► operator-published bot-range feeds (HTTPS GET,
         │                    │   bot-verification.ts:117) — external data a verdict reads
         │                    └─► views.ts HTML ──► back to any client (public corpus)
-Operator workstation ──► backfill CLIs / deno deploy (trusted; holds DENO_KV_URL)
+Operator workstation ──► backfill CLIs / prod-probe-loop / deno deploy (trusted; holds DENO_KV_URL)
 ```
 
 Actors:
@@ -50,7 +52,7 @@ Actors:
 | Crawling UA's browser                                             | **Untrusted**                | Executes first-party probe JS we serve; its reports/timings are client-authored data.            |
 | Bot-range feed operators (Google, OpenAI, Bing, Anthropic, Apple) | Trusted for verdict _inputs_ | Pinned HTTPS URLs (bot-verification.ts:11-49); their data decides `verified`.                    |
 | Deno Deploy runtime                                               | Trusted infrastructure       | `info?.remoteAddr` (the connection peer) is the only address nobody can forge (server.ts:74-86). |
-| Operator (Paul)                                                   | Trusted                      | Runs the backfill CLIs and deploys; holds KV credentials.                                        |
+| Operator (Paul)                                                   | Trusted                      | Runs the backfill CLIs, the prod-probe-loop harness and deploys; holds KV credentials.           |
 
 ## 3. Explicitly trusted (non-threats — do not flag these)
 
@@ -71,6 +73,20 @@ Actors:
   entries intentional and narrow.
 - **Operator-local execution**: `deno task backfill*`, `deploy-check.ts`, tests (hermetic `:memory:`
   KV per tests/testenv.ts). Local KV and `DENO_KV_URL` are operator-held.
+- **`tools/prod-probe-loop.ts` — the on-demand production harness** (contractually in no gate tier,
+  tests/gate_mapping_test.ts:1067): the repo's only browser/CDP harness, operator-run like the CLIs
+  above. It spawns a local Chrome from an env-selected binary (`CHROME`,
+  tools/prod-probe-loop.ts:44) through `launchChrome` (tools/prod-probe-loop.ts:130-131), with
+  `--no-sandbox` and a loopback CDP endpoint (`--remote-debugging-port=0`,
+  tools/prod-probe-loop.ts:140), dialing the loopback `wsUrl` Chrome itself prints to stderr
+  (tools/prod-probe-loop.ts:157-158), and evaluates probe JS in the page over that CDP
+  (`Runtime.evaluate`, tools/prod-probe-loop.ts:177). The trace it audits is minted normally and
+  read back from the public `ua-tracer-trace` cookie (`traceId`, tools/prod-probe-loop.ts:281-282) —
+  no credential, no admin surface, nothing an anonymous client lacks. Evidence (screenshots,
+  summary.json) lands under the checkout's gitignored `artifacts/` dir (`ARTIFACT_DIR`,
+  tools/prod-probe-loop.ts:43); the target origin defaults to the production site, overridable with
+  `--origin`/`PROD_ORIGIN` (tools/prod-probe-loop.ts:41), so a run creates real, ordinary traffic in
+  the public corpus — exactly why it stays on demand and out of every gate tier.
 - **`/api/health` disclosures** (server.ts:934-961): build id, repair schedule state, timestamps —
   deliberately non-secret deploy-verification signals.
 - **Probe assets served for unknown traces** (server.ts:411-417): serving a static asset body to a

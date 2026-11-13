@@ -1300,18 +1300,20 @@ async function auditCitations(
         );
         continue;
       }
-      const line = text.split("\n")[at - 1] ?? "";
-      const lineStart = para.text.lastIndexOf(line, match.index);
-      const column = lineStart < 0 ? line.length : match.index - lineStart;
-      // The 40 characters immediately before the ref are its own clause: what the
-      // sentence attributes to this pointer, not to the ref beside it.
-      const context = line.slice(Math.max(0, column - 40), column);
-      // The clause's LAST code symbol decides (see citationDecision, ua-tracer-27o): a
-      // clause that names a wrapper call beside its real subject anchors on the subject,
-      // and the failure message therefore names the symbol nearest the ref (ua-tracer-ngt)
-      // rather than whichever named symbol happened to be listed first.
+      // The citation's clause is the sentence it sits in, cut at the PREVIOUS citation: a fixed
+      // character window starts mid-identifier (`securityHeaders` -> `urityHeaders`, a symbol that
+      // exists nowhere) or lands entirely inside the parenthetical while the subject it names
+      // wrapped onto the previous line (ua-tracer-lps), but the whole sentence lets a sibling
+      // ref's subject claim this one (ua-tracer-k8t). Cutting at the previous ref keeps the
+      // subject and drops the neighbour. The nearest named symbol still decides (ua-tracer-27o).
+      const sentenceStart = para.text.lastIndexOf(". ", match.index) + 1;
+      const sentence = para.text.slice(Math.max(0, sentenceStart - 1), match.index);
+      const previous = [...sentence.matchAll(refPattern)].pop();
+      const clauseEnd = previous && previous.index !== undefined
+        ? previous.index + previous[0].length
+        : 0;
       const decision = citationDecision(
-        context,
+        sentence.slice(clauseEnd),
         from,
         to,
         (symbol) => codeOccurrences(symbol, source),
@@ -1329,27 +1331,37 @@ async function auditCitations(
         );
         continue;
       }
-      // No symbol in the 40-character clause is code in the cited file: the ref used to be
+      // No symbol named in the clause is code in the cited file: the ref used to be
       // bounds-checked only, which let a wrong-but-real file ("`peerIp`, bot-verification.ts:74")
       // and an in-range wrong line on a symbol-free clause ("`/api/health`, server.ts:100") pass
-      // silently (ua-tracer-lps). Now the sentence must name a literal that is really on the
-      // cited lines, e.g. the route, key, env var or table row the sentence is about.
-      const sentenceStart = para.text.lastIndexOf(". ", match.index) + 1;
-      const sentence = para.text.slice(Math.max(0, sentenceStart - 1), match.index);
+      // silently (ua-tracer-lps). The fallback depends on the shape of the ref:
+      //
+      //  - a SINGLE line may be anchored by a literal the sentence names that is on that line,
+      //    because there is no range for the token to hide in;
+      //  - a RANGE must name a symbol that is code inside it. A presence test cannot police a
+      //    range: `(server.ts:934-961)` narrowed to `(server.ts:934)` still matched the
+      //    `/api/health` route token while citing one line of a 28-line payload, so a shared token
+      //    masked a wrong range (ua-tracer-k8t). A range is a code unit and can be named.
       const cited = source.slice(from - 1, to).join("\n");
       const literals = literalsIn(sentence);
-      const hit = literals.find((literal) => cited.includes(literal));
+      const hit = from === to ? literals.find((literal) => cited.includes(literal)) : undefined;
       if (hit) {
         audit.literalAnchored++;
         continue;
       }
       audit.failures.push(
-        `${marker}:${at} cites ${whole}, but nothing it names is on that line — ` +
-          (literals.length
-            ? `none of ${literals.map((l) => `\`${l}\``).join(", ")} appears in ${
-              file.split("/").pop()
-            }:${from}${to > from ? `-${to}` : ""}; name the symbol or literal that is there`
-            : "name the symbol or literal that is there"),
+        `${marker}:${at} cites ${whole}, but nothing it names is ` +
+          (from === to
+            ? `on that line — none of ${
+              literals.map((l) => `\`${l}\``).join(", ") || "(nothing named)"
+            } ` +
+              `appears in ${
+                file.split("/").pop()
+              }:${from}; name the symbol or literal that is there`
+            : `code inside that range — a range must name a symbol (e.g. a function or constant) ` +
+              `that is code between ${file.split("/").pop()}:${from} and :${to}; named: ${
+                literals.map((l) => `\`${l}\``).join(", ") || "(nothing)"
+              }`),
       );
     }
   }
@@ -1390,7 +1402,8 @@ Deno.test("a drifted citation is refused, including the two drifts that used to 
   //  - wrong line far from the symbol (the drift the guard was built for);
   //  - wrong file that does not exist;
   //  - escape 1 (ua-tracer-ch5): a real file where the named symbol is not code;
-  //  - escape 2 (ua-tracer-ch5): an in-range wrong line on a clause that names no symbol.
+  //  - escape 2 (ua-tracer-ch5): an in-range wrong line on a clause that names no symbol;
+  //  - a range narrowed until the symbol it names is outside the +-7 window (ua-tracer-k8t).
   const cases: { name: string; from: string; to: string; expect: RegExp }[] = [
     {
       name: "wrong line far from the named symbol",
@@ -1412,9 +1425,15 @@ Deno.test("a drifted citation is refused, including the two drifts that used to 
     },
     {
       name: "in-range wrong line on a clause with no symbol (escape 2)",
-      from: "(server.ts:934-961)",
-      to: "(server.ts:100)",
-      expect: /cites server\.ts:100, but nothing it names is on that line.*\/api\/health/s,
+      from: "`--allow-net` (deno.json:17)",
+      to: "`--allow-net` (deno.json:5)",
+      expect: /cites deno\.json:5, but nothing it names is on that line/,
+    },
+    {
+      name: "range narrowed until the named symbol leaves the window (k8t)",
+      from: "(`repairHealth`, server.ts:934-961)",
+      to: "(`repairHealth`, server.ts:934)",
+      expect: /cites server\.ts:934 for `repairHealth`, which is at server\.ts:46\/951/,
     },
   ];
   for (const c of cases) {

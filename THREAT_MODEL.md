@@ -61,7 +61,7 @@ Actors:
 | Anonymous client                                                  | **Untrusted**                | Chooses UA, headers, cookies, URL path, POST bodies.                                                             |
 | Crawling UA's browser                                             | **Untrusted**                | Executes first-party probe JS we serve; its reports/timings are client-authored data.                            |
 | Bot-range feed operators (Google, OpenAI, Bing, Anthropic, Apple) | Trusted for verdict _inputs_ | Pinned HTTPS URLs (`BOT_RANGE_SOURCES`, bot-verification.ts:11-49); their data decides `verified`.               |
-| Deno Deploy runtime                                               | Trusted infrastructure       | `info?.remoteAddr` (the connection peer) is the only address nobody can forge (server.ts:74-86).                 |
+| Deno Deploy runtime                                               | Trusted infrastructure       | `info?.remoteAddr` (the connection peer) is the only address nobody can forge (`peerIp`, server.ts:74-86).       |
 | Operator (Paul)                                                   | Trusted                      | Runs the backfill CLIs, the prod-probe-loop harness and deploys; holds KV credentials.                           |
 | Test harness (full tier)                                          | Trusted, local only          | Spawns its own Chrome, dials it over loopback CDP, and navigates only the in-process handler over `:memory:` KV. |
 
@@ -70,8 +70,8 @@ Actors:
 - **The connection peer from `Deno.serve` info** (`peerIp`, server.ts:74): the runtime-reported TCP
   peer. It is the sole address a bot verdict may use; treat it as ground truth.
 - **Server-minted identifiers**: `shortId()` (storage.ts:168, `crypto.getRandomValues`, 8 bytes over
-  a 62-char alphabet) and the per-trace secret minted beside it (server.ts:573-574). Interpolating
-  these into HTML or generated probe bodies is safe by construction.
+  a 62-char alphabet) and the per-trace secret minted beside it (`shortId`, server.ts:573-574).
+  Interpolating these into HTML or generated probe bodies is safe by construction.
 - **Server-owned constants in templates**: `AssetKind` labels (`KIND_LABEL`, views.ts:944), badge
   classes, the inline stylesheet, and the fixed route strings. Only client-derived values need
   escaping (see invariant I3).
@@ -82,8 +82,8 @@ Actors:
   server.ts:643-665): it is a probe instrument to detect CSP-reporting UAs, never a security
   control.
 - **The enforced baseline CSP on every response** (`securityHeaders`, server.ts:107-134):
-  first-party-only `default-src 'self'` (server.ts:107-134); the `data:` img-src and `unsafe-inline`
-  style-src entries intentional and narrow.
+  first-party-only `default-src 'self'`; the `data:` img-src and `unsafe-inline` style-src entries
+  intentional and narrow.
 - **Operator-local execution**: `deno task backfill*`, `deploy-check.ts`, tests (hermetic `:memory:`
   KV per tests/testenv.ts). Local KV and `DENO_KV_URL` are operator-held.
 - **`tools/prod-probe-loop.ts` — the on-demand production harness** (contractually in no gate tier,
@@ -115,8 +115,8 @@ Actors:
   future edit could leave loopback. Its CDP session is test output, not a production surface: the
   same CDP mechanism as the harness above, a different origin. It is the only other place in the
   repo where a browser runs, and the fast tier never starts one.
-- **`/api/health` disclosures** (server.ts:934-961): build id, repair schedule state, timestamps —
-  deliberately non-secret deploy-verification signals.
+- **`/api/health` disclosures** (`repairHealth`, server.ts:934-961): build id, repair schedule
+  state, timestamps — deliberately non-secret deploy-verification signals.
 - **Probe assets served for unknown traces** (`logHit`, server.ts:411-417): serving a static asset
   body to a bot without recording a hit is intentional (probe reachability), not an information leak
   — the bodies are fixed or derived only from the (validated) path segments.
@@ -144,7 +144,7 @@ Actors:
 ### 4.2 Claimed addresses: `x-forwarded-for`, `x-real-ip`
 
 - Deno Deploy sets no forwarding header of its own; a client-supplied `x-forwarded-for` arrives
-  verbatim (server.ts:82-87 comment, measured live 2026-10-13). So:
+  verbatim (`clientIp`, server.ts:82-87 comment, measured live 2026-10-13). So:
   - `clientIp` (server.ts:89) prefers the **connection peer**; claimed headers are recorded only
     when no peer exists, and then only as **recorded context, never verdict input**.
   - Verdicts use `peerIp(info)` exclusively: `classifyBot` is called with the peer address
@@ -181,9 +181,9 @@ Actors:
 ### 4.4 Trace cookie on `GET /` (`ua-tracer-trace`)
 
 - The cookie is client-controlled text; only an id-shaped claim (`[a-zA-Z0-9_-]+`, ≤64 chars,
-  server.ts:553-565) may become a KV key part, and a claim that misses simply mints a fresh trace.
-  Reuse is an anti-spam measure (`COOKIE_NAME`, server.ts:543-570), not an auth mechanism. The
-  cookie is `SameSite=Lax`, `Secure` on https (server.ts:661-665).
+  `cookieMatch`, server.ts:553-565) may become a KV key part, and a claim that misses simply mints a
+  fresh trace. Reuse is an anti-spam measure (`COOKIE_NAME`, server.ts:543-570), not an auth
+  mechanism. The cookie is `SameSite=Lax`, `Secure` on https (server.ts:661-665).
 
 ### 4.5 POST bodies: `/r/{id}/{secret}/timing`, `csp-report`, `report`
 
@@ -202,9 +202,9 @@ Actors:
 ### 4.6 Arbitrary request headers (all names, all values)
 
 - Reach a record only through `clientHeaders` (storage.ts:85):
-  - the **reserved evidence namespace** `x-report-*`, `x-timing-*`, `x-payload-` (storage.ts:44-58)
-    is stripped — a client can never write a "server said" annotation (ua-tracer-0l9,
-    ua-tracer-egg);
+  - the **reserved evidence namespace** `x-report-*`, `x-timing-*`, `x-payload-`
+    (`SYNTHETIC_HEADER_PREFIXES`, storage.ts:44-58) is stripped — a client can never write a "server
+    said" annotation (ua-tracer-0l9, ua-tracer-egg);
   - credential-shaped names are redacted (`SENSITIVE_HEADER_NAME`, storage.ts:22-31).
 - The strip is **re-applied at the persistence boundary** (`withEvidence`, storage.ts:652-666), and
   evidence may enter only through the explicit `evidence` argument keyed by `EVIDENCE_KEYS`
@@ -222,8 +222,8 @@ Actors:
   numbers; `kinds` come from the fixed `AssetKind` union. Probe-path display and filter links slice
   to the stored bounds first (`MAX_PROBE_PATH_CHARS`, views.ts:778-779, 842-843) — legacy unbounded
   rows predate the write bound.
-- The waterfall (`traceDetailHtml`, views.ts:971) renders `escapeHtml(e.name)` etc. (`waterfall`,
-  views.ts:1080-1088).
+- The waterfall (`traceDetailHtml`, views.ts:971) renders `escapeHtml(e.name)` and `initiatorType`
+  (`initiatorType`, views.ts:1080-1088).
 
 ### 4.8 External bot-range feeds (verdict inputs)
 
@@ -277,7 +277,8 @@ legacy records already carrying a forged verdict in KV still render "verified" u
 Closed after the bootstrap: **ua-tracer-uct** — a throw inside `routeHandler` used to escape as
 Deno's bare default 500, which carries none of the baseline headers. `handler` now wraps the route
 in a try/catch, substitutes a plain 500 on a throw and sets the baseline on it, and sets the
-baseline on every other exit too (server.ts:1051-1061), so I9 holds for thrown requests as well.
+baseline on every other exit too (`securityHeaders`, server.ts:1051-1061), so I9 holds for thrown
+requests as well.
 
 ## 6. Security invariants for auditors
 
@@ -293,7 +294,7 @@ baseline on every other exit too (server.ts:1051-1061), so I9 holds for thrown r
   fixed enums interpolate raw. Generated CSS/JS reflect path segments only after `PROBE_SEGMENT` +
   `cssSafeSegment`.
 - **I4 — Unenumerable secrets.** Wrong/missing secret and not-found are byte-identical 404s; legacy
-  URLs are refused on secret-bearing traces (server.ts:325-347).
+  URLs are refused on secret-bearing traces (`storedSecret`, server.ts:325-347).
 - **I5 — Bounded writes, loud degradation.** Every client-shaped field is bounded before a KV write
   (`MAX_RECORD_BYTES`, storage.ts:279-304, 374, 394); a record KV would reject must fall back to
   smaller forms with a warning, never throw off the request path.
@@ -325,7 +326,7 @@ baseline on every other exit too (server.ts:1051-1061), so I9 holds for thrown r
 - **Probe JS runs in arbitrary visitors' browsers**: first-party code only, no credentials or user
   data exist to steal; a hostile client "attacking itself" is out of scope.
 - **`/api/health` reveals build id and repair state**: intentional deploy-verification surface, no
-  secrets (server.ts:934-961).
+  secrets (`repairHealth`, server.ts:934-961).
 - **IPs are recorded but not displayed** in list views today; surfacing them later must respect I7's
   redaction rules and the stored-bounds (I5).
 - **The KV corpus is operator-visible via `DENO_KV_URL`**: trusted-operator surface, out of scope

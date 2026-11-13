@@ -1211,36 +1211,101 @@ function citationDecision(
   return { anchored: anchor.occurs.some((n) => n >= from - 7 && n <= to + 7), anchor };
 }
 
-Deno.test("THREAT_MODEL.md's refs resolve and a cited symbol is beside its line", async () => {
-  const marker = "THREAT_MODEL.md";
-  const text = await Deno.readTextFile(new URL(`../${marker}`, import.meta.url));
-  const refPattern = /([A-Za-z0-9_./-]+\.(?:ts|md|json|yml|sh|conf)):(\d+)(?:-(\d+))?/g;
-  const failures: string[] = [];
-  let refs = 0;
-  let anchored = 0;
+/**
+ * The document split into paragraphs (blank line separated), each joined onto one line and
+ * carrying a map from character index back to the document line. A citation's clause is read from
+ * here rather than from a fixed character window, because a window that starts mid-identifier
+ * turns `securityHeaders` into `urityHeaders` and then "no symbol resolves" is a false alarm
+ * (ua-tracer-lps).
+ */
+function paragraphs(lines: string[]): { text: string; lineAt: number[] }[] {
+  const out: { text: string; lineAt: number[] }[] = [];
+  let text: string[] = [];
+  let lineAt: number[] = [];
+  const flush = () => {
+    if (text.length) out.push({ text: text.join(""), lineAt });
+    text = [];
+    lineAt = [];
+  };
+  lines.forEach((line, n) => {
+    if (!line.trim()) return flush();
+    if (text.length) {
+      text.push(" ");
+      lineAt.push(n);
+    }
+    text.push(line);
+    for (let c = 0; c < line.length; c++) lineAt.push(n);
+  });
+  flush();
+  return out;
+}
 
-  for (const [i, line] of text.split("\n").entries()) {
-    for (const match of line.matchAll(refPattern)) {
+/**
+ * The literals a clause names: backticked spans, `file.ext` paths and `/route` shapes. These are
+ * checked for textual PRESENCE in the cited lines rather than for code shape, so a citation whose
+ * subject is a route, an env var, a KV key or a markdown table row is still anchored to something
+ * the reader can see on the line they land on (ua-tracer-lps).
+ */
+function literalsIn(clause: string): string[] {
+  const found: string[] = [];
+  const add = (s: string) => {
+    const tok = s.trim();
+    if (tok.length >= 3 && !found.includes(tok)) found.push(tok);
+  };
+  for (const m of clause.matchAll(/`([^`]+)`/g)) add(m[1]);
+  for (const m of clause.matchAll(/[A-Za-z0-9_./-]+\.(?:ts|md|json|yml|sh|conf)/g)) add(m[0]);
+  for (const m of clause.matchAll(/\/[A-Za-z0-9_./{}*-]{2,}/g)) add(m[0]);
+  return found;
+}
+
+interface CitationAudit {
+  refs: number;
+  symbolAnchored: number;
+  literalAnchored: number;
+  failures: string[];
+}
+
+/**
+ * Every `file:line` ref in `text`, checked twice - by the symbol its clause names (ua-tracer-27o,
+ * unchanged) and, when that clause names no symbol that is code in the cited file, by a literal it
+ * names that must appear on the cited lines (ua-tracer-lps). Extracted from the test so the same
+ * checker can be run over a deliberately mutated copy of the document: that is the only proof the
+ * guard can go red.
+ */
+async function auditCitations(
+  text: string,
+  readSource: (file: string) => Promise<string[]>,
+): Promise<CitationAudit> {
+  const marker = "THREAT_MODEL.md";
+  const refPattern = /([A-Za-z0-9_./-]+\.(?:ts|md|json|yml|sh|conf)):(\d+)(?:-(\d+))?/g;
+  const audit: CitationAudit = { refs: 0, symbolAnchored: 0, literalAnchored: 0, failures: [] };
+
+  for (const para of paragraphs(text.split("\n"))) {
+    for (const match of para.text.matchAll(refPattern)) {
       const [whole, file, fromRaw, toRaw] = match;
       const from = Number(fromRaw);
       const to = toRaw ? Number(toRaw) : from;
+      const at = para.lineAt[match.index] + 1;
       let source: string[];
       try {
-        source = (await Deno.readTextFile(new URL(`../${file}`, import.meta.url))).split("\n");
+        source = await readSource(file);
       } catch {
-        failures.push(`${marker}:${i + 1} cites ${whole}, but ${file} does not exist`);
+        audit.failures.push(`${marker}:${at} cites ${whole}, but ${file} does not exist`);
         continue;
       }
-      refs++;
+      audit.refs++;
       if (from < 1 || to < from || to > source.length) {
-        failures.push(
-          `${marker}:${i + 1} cites ${whole}, outside ${file} (${source.length} lines)`,
+        audit.failures.push(
+          `${marker}:${at} cites ${whole}, outside ${file} (${source.length} lines)`,
         );
         continue;
       }
+      const line = text.split("\n")[at - 1] ?? "";
+      const lineStart = para.text.lastIndexOf(line, match.index);
+      const column = lineStart < 0 ? line.length : match.index - lineStart;
       // The 40 characters immediately before the ref are its own clause: what the
       // sentence attributes to this pointer, not to the ref beside it.
-      const context = line.slice(Math.max(0, match.index - 40), match.index);
+      const context = line.slice(Math.max(0, column - 40), column);
       // The clause's LAST code symbol decides (see citationDecision, ua-tracer-27o): a
       // clause that names a wrapper call beside its real subject anchors on the subject,
       // and the failure message therefore names the symbol nearest the ref (ua-tracer-ngt)
@@ -1252,25 +1317,124 @@ Deno.test("THREAT_MODEL.md's refs resolve and a cited symbol is beside its line"
         (symbol) => codeOccurrences(symbol, source),
       );
       if (decision.anchored) {
-        anchored++;
-      } else if (decision.anchor) {
+        audit.symbolAnchored++;
+        continue;
+      }
+      if (decision.anchor) {
         const { symbol, occurs } = decision.anchor;
-        failures.push(
-          `${marker}:${i + 1} cites ${whole} for \`${symbol}\`, which is at ${
+        audit.failures.push(
+          `${marker}:${at} cites ${whole} for \`${symbol}\`, which is at ${
             file.split("/").pop()
           }:${occurs.slice(0, 3).join("/")} — re-derive the number`,
         );
+        continue;
       }
+      // No symbol in the 40-character clause is code in the cited file: the ref used to be
+      // bounds-checked only, which let a wrong-but-real file ("`peerIp`, bot-verification.ts:74")
+      // and an in-range wrong line on a symbol-free clause ("`/api/health`, server.ts:100") pass
+      // silently (ua-tracer-lps). Now the sentence must name a literal that is really on the
+      // cited lines, e.g. the route, key, env var or table row the sentence is about.
+      const sentenceStart = para.text.lastIndexOf(". ", match.index) + 1;
+      const sentence = para.text.slice(Math.max(0, sentenceStart - 1), match.index);
+      const cited = source.slice(from - 1, to).join("\n");
+      const literals = literalsIn(sentence);
+      const hit = literals.find((literal) => cited.includes(literal));
+      if (hit) {
+        audit.literalAnchored++;
+        continue;
+      }
+      audit.failures.push(
+        `${marker}:${at} cites ${whole}, but nothing it names is on that line — ` +
+          (literals.length
+            ? `none of ${literals.map((l) => `\`${l}\``).join(", ")} appears in ${
+              file.split("/").pop()
+            }:${from}${to > from ? `-${to}` : ""}; name the symbol or literal that is there`
+            : "name the symbol or literal that is there"),
+      );
     }
   }
+  return audit;
+}
 
-  if (refs < 50) throw new Error(`only ${refs} refs found in ${marker}; did the format change?`);
-  if (failures.length) {
-    throw new Error(`${failures.length} stale citation(s):\n${failures.join("\n")}`);
+Deno.test("THREAT_MODEL.md's refs resolve and a cited symbol is beside its line", async () => {
+  const marker = "THREAT_MODEL.md";
+  const text = await Deno.readTextFile(new URL(`../${marker}`, import.meta.url));
+  const audit = await auditCitations(
+    text,
+    async (file) => (await Deno.readTextFile(new URL(`../${file}`, import.meta.url))).split("\n"),
+  );
+  if (audit.refs < 50) {
+    throw new Error(`only ${audit.refs} refs found in ${marker}; did the format change?`);
   }
-  // Sanity: the anchor half of the check must be doing real work, not skipping
+  if (audit.failures.length) {
+    throw new Error(`${audit.failures.length} stale citation(s):\n${audit.failures.join("\n")}`);
+  }
+  // Sanity: the anchor halves of the check must be doing real work, not skipping
   // every ref because the prose stopped naming symbols.
-  if (anchored < 20) throw new Error(`only ${anchored}/${refs} refs are symbol-anchored`);
+  if (audit.symbolAnchored < 20) {
+    throw new Error(`only ${audit.symbolAnchored}/${audit.refs} refs are symbol-anchored`);
+  }
+});
+
+Deno.test("a drifted citation is refused, including the two drifts that used to pass (ua-tracer-lps)", async () => {
+  const marker = "THREAT_MODEL.md";
+  const base = await Deno.readTextFile(new URL(`../${marker}`, import.meta.url));
+  const readSource = async (file: string) =>
+    (await Deno.readTextFile(new URL(`../${file}`, import.meta.url))).split("\n");
+  const clean = await auditCitations(base, readSource);
+  if (clean.failures.length) {
+    throw new Error(`the unmutated document already fails:\n${clean.failures.join("\n")}`);
+  }
+  // Each case is a mutation of the real document, so the assertion is about the message text a
+  // lane would actually see, not about a hand-built string:
+  //  - wrong line far from the symbol (the drift the guard was built for);
+  //  - wrong file that does not exist;
+  //  - escape 1 (ua-tracer-ch5): a real file where the named symbol is not code;
+  //  - escape 2 (ua-tracer-ch5): an in-range wrong line on a clause that names no symbol.
+  const cases: { name: string; from: string; to: string; expect: RegExp }[] = [
+    {
+      name: "wrong line far from the named symbol",
+      from: "(`peerIp`, server.ts:74)",
+      to: "(`peerIp`, server.ts:200)",
+      expect: /cites server\.ts:200 for `peerIp`, which is at server\.ts:74\/90\/1019/,
+    },
+    {
+      name: "wrong file that does not exist",
+      from: "(`peerIp`, server.ts:74)",
+      to: "(`peerIp`, servre.ts:74)",
+      expect: /cites servre\.ts:74, but servre\.ts does not exist/,
+    },
+    {
+      name: "wrong but existing file where the named symbol is not code (escape 1)",
+      from: "(`peerIp`, server.ts:74)",
+      to: "(`peerIp`, bot-verification.ts:74)",
+      expect: /cites bot-verification\.ts:74, but nothing it names is on that line/,
+    },
+    {
+      name: "in-range wrong line on a clause with no symbol (escape 2)",
+      from: "(server.ts:934-961)",
+      to: "(server.ts:100)",
+      expect: /cites server\.ts:100, but nothing it names is on that line.*\/api\/health/s,
+    },
+  ];
+  for (const c of cases) {
+    const mutated = base.replace(c.from, c.to);
+    if (mutated === base) {
+      throw new Error(
+        `mutation "${c.name}" did not apply: ${c.from} is no longer in ${marker} — re-derive it`,
+      );
+    }
+    const audit = await auditCitations(mutated, readSource);
+    const joined = audit.failures.join("\n");
+    if (!audit.failures.length) {
+      throw new Error(`mutation "${c.name}" escaped the guard: ${c.to} was accepted`);
+    }
+    if (!c.expect.test(joined)) {
+      throw new Error(
+        `mutation "${c.name}" failed for the wrong reason: expected ${c.expect} in\n${joined}`,
+      );
+    }
+  }
 });
 
 Deno.test("symbolsIn reads dotted identifiers as code, prose abbreviations as prose", () => {
